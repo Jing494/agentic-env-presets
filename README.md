@@ -126,6 +126,8 @@ it until they restart.
 | [`package.json`](package.json) | Bundle manifest; `dsh.bundle.patch` lists both patch files |
 | [`icon.svg`](icon.svg), [`locale/en.json`](locale/en.json), [`locale/zh.json`](locale/zh.json) | Official-style icon and localized bundle title/description |
 | [`docs/DETAIL.md`](docs/DETAIL.md), [`docs/DETAIL.zh.md`](docs/DETAIL.zh.md) | The detail document each language's `meta.detail` points at |
+| [`docs/PUBLISHING.md`](docs/PUBLISHING.md), [`docs/PUBLISHING.zh.md`](docs/PUBLISHING.zh.md) | Repository requirements for publishing and being indexed as a DSH plugin |
+| [`LICENSE`](LICENSE) | MIT |
 | [`README.zh.md`](README.zh.md) | Chinese README |
 | [`移植说明.md`](移植说明.md) | Chinese design/pitfall/porting notes |
 | [`PROMPT.md`](PROMPT.md) | The original task brief |

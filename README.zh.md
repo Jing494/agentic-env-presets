@@ -119,6 +119,8 @@ dsh plugin --profile web remove dsh-agentic-env-presets
 | [`package.json`](package.json) | bundle 清单；`dsh.bundle.patch` 列出两个 patch 文件 |
 | [`icon.svg`](icon.svg)、[`locale/en.json`](locale/en.json)、[`locale/zh.json`](locale/zh.json) | 官方风格图标与本地化标题／描述 |
 | [`docs/DETAIL.md`](docs/DETAIL.md)、[`docs/DETAIL.zh.md`](docs/DETAIL.zh.md) | 各语言 `meta.detail` 指向的详情文档 |
+| [`docs/PUBLISHING.md`](docs/PUBLISHING.md)、[`docs/PUBLISHING.zh.md`](docs/PUBLISHING.zh.md) | 作为 DSH 插件发布与收录所需的仓库规范 |
+| [`LICENSE`](LICENSE) | MIT |
 | [`README.md`](README.md) | 英文 README |
 | [`移植说明.md`](移植说明.md) | 中文设计／坑／移植笔记 |
 | [`PROMPT.md`](PROMPT.md) | 最初的任务简报 |
