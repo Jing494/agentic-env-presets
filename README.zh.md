@@ -14,17 +14,98 @@ caching 以及每一个配置值都从官方声明逐字复制。组合上唯一
 
 ## 安装
 
-```sh
-# 从 npm 安装
-dsh plugin --profile web add dsh-agentic-env-presets
+要求 DSH 的提示词 API 与本 bundle 匹配——即 `0.1.7` 到 `0.2.x`（见
+[兼容性](#兼容性)）。除此之外不需要任何东西：没有构建步骤、没有原生依赖、
+没有 post-install 脚本。
 
-# 或直接从仓库安装
-dsh plugin --profile web add https://github.com/Jing494/agentic-env-presets
+### 在插件页填写安装（图形界面）
+
+Web GUI 的插件管理器用同一个输入框完成上面三种安装（**设置 → 插件 → 安装**）。
+粘贴以下任意一种：
+
+| 填这个 | 装到的东西 | 解析类型 |
+|---|---|---|
+| `dsh-agentic-env-presets` | npm 上的最新版 | registry |
+| `dsh-agentic-env-presets@1.1.0` | npm 上那个确切版本 | registry |
+| `https://github.com/Jing494/agentic-env-presets` | GitHub 默认分支 | git |
+| `github:Jing494/agentic-env-presets` | GitHub 默认分支 | git |
+| `/absolute/path/to/agentic-env-presets` | 本地检出目录 | path |
+
+那个输入框要的就是 **npm 包名**、**GitHub 仓库地址** 或 **本地目录路径**——只有
+这三种形态。下面这些看着对、但**装不上**，每条都用安装器自己的解析器实测过：
+
+| 别填 | 为什么失败 |
+|---|---|
+| `https://www.npmjs.com/package/dsh-agentic-env-presets` | 这是 npm 的**网页地址**，不是仓库地址；它会被当成 git 主机解析然后失败。请填纯包名。 |
+| `npm install dsh-agentic-env-presets` / `dsh plugin add …` | 整条命令行不是安装规格；只填 `add` **之后**的那一段。 |
+| `Jing494/agentic-env-presets` | 既不是合法包名也不是 URL——请用完整的 `https://github.com/…` 形式。 |
+| `./agentic-env-presets` | 本地路径必须是**绝对路径**。 |
+
+这个 bundle 从不安装脚本，所以插件页不会让你确认任何构建步骤。如果它要装的某个
+包确实想跑安装脚本，页面会停下来先问你——那是**授权门槛**，不是报错。
+
+### 从 npm 安装（推荐）
+
+```sh
+dsh plugin --profile web add dsh-agentic-env-presets
 ```
 
-两种方式都会把这个 bundle 登记为 profile 的一层。重启 profile（或在新建会话时选
-其中一个预设），预设选择器里就会出现 `标准模式（中性环境）` 和
-`PTC 模式（中性环境）`。
+想自己控制升级时机的话，可以钉死版本：
+
+```sh
+dsh plugin --profile web add dsh-agentic-env-presets@1.1.0
+```
+
+### 从 GitHub 安装
+
+跟踪仓库的默认分支——你拿到的是最新提交，**包括尚未正式发布的改动**：
+
+```sh
+dsh plugin --profile web add https://github.com/Jing494/agentic-env-presets
+# 或 pnpm 支持的简写：
+dsh plugin --profile web add github:Jing494/agentic-env-presets
+```
+
+### 从本地检出安装
+
+适合要改预设或改写插件本身的情况。`link:` 让 Host 直接指向这个工作目录，改完
+不用重装就能看到效果：
+
+```sh
+dsh plugin --profile web add link:/path/to/agentic-env-presets
+```
+
+### 安装之后
+
+上面两条命令都会自动把这个 bundle 登记为 profile 的一层。`dsh` 会把它写进
+`$DSH_HOME/profiles/<profile>/package.json` 的 `dsh.profile.bundles`，可以这样确认：
+
+```sh
+dsh --profile web --dump-config | grep -E 'preset-(standard|ptc)-env'
+```
+
+重启 profile，然后在**新建**会话时选 `标准模式（中性环境）` 或
+`PTC 模式（中性环境）`——选择器里它们会和内置预设排在一起。已存在的会话保持它
+启动时的预设不变。
+
+### 验证安装
+
+```sh
+dsh --profile web --dump-config | grep -c env-identity   # 期望输出 2
+```
+
+如果某个 bundle 加载失败，`dsh` 会打印
+`skipping profile bundle "<名称>": <原因>` 然后照常启动——坏的 bundle 永远不会
+把 profile 拖垮。修好之后重新 `add` 即可。
+
+### 卸载
+
+```sh
+dsh plugin --profile web remove dsh-agentic-env-presets
+```
+
+这一步会同时移除依赖和它在 `dsh.profile.bundles` 里的条目，不会留下残留的层。
+已经跑在这些预设上的会话会一直用到重启为止。
 
 ## 交付物
 

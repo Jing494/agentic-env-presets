@@ -6,6 +6,36 @@
 新建会话时选 `标准模式（中性环境）`（`standard-env`）或 `PTC 模式（中性环境）`
 （`ptc-env`）。已存在的会话保持它启动时的预设不变。
 
+## 安装
+
+任选一种——没有构建步骤、没有原生依赖、没有安装脚本。
+
+```sh
+# 从 npm 安装（推荐）——钉版本的写法：dsh-agentic-env-presets@1.1.0
+dsh plugin --profile web add dsh-agentic-env-presets
+
+# 从 GitHub 安装（跟踪默认分支，会带上尚未发布的提交）
+dsh plugin --profile web add https://github.com/Jing494/agentic-env-presets
+
+# 从本地检出安装，link 方式适合边改边看
+dsh plugin --profile web add link:/path/to/agentic-env-presets
+```
+
+也可以直接用本页的安装框。它只接受三种形态：**npm 包名**
+（`dsh-agentic-env-presets`，可加 `@1.1.0`）、**GitHub 仓库地址**
+（`https://github.com/Jing494/agentic-env-presets`）、或**绝对本地目录路径**。
+
+它**不接受** npm 网页地址（`https://www.npmjs.com/package/…`）、整条命令行
+（`dsh plugin add …`）、裸的 `owner/repo`、以及相对路径。
+
+装完这样确认，输出应为 `2`：
+
+```sh
+dsh --profile web --dump-config | grep -c env-identity
+```
+
+加载不了的 bundle 会在启动时被跳过并打印原因，profile 本身照常启动。
+
 ## 它做了什么
 
 预设改不了**部署级**的 `includeHarnessIdentity` 开关，也不该去全局改写框架的提示词

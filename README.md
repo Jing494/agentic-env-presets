@@ -16,17 +16,103 @@ extra row, `env-identity`.
 
 ## Install
 
-```sh
-# from npm
-dsh plugin --profile web add dsh-agentic-env-presets
+Requires a DSH whose prompt API matches this bundle — `0.1.7` through `0.2.x`
+(see [Compatibility](#compatibility)). Nothing else is needed: no build step, no
+native dependency, no post-install script.
 
-# or straight from the repository
-dsh plugin --profile web add https://github.com/Jing494/agentic-env-presets
+### From the plugin page (GUI)
+
+The Web GUI's plugin manager installs the same three things through one text box
+(**Settings → Plugins → install**). Paste any one of these:
+
+| Paste this | Installs | Resolves as |
+|---|---|---|
+| `dsh-agentic-env-presets` | latest from npm | registry |
+| `dsh-agentic-env-presets@1.1.0` | that exact npm version | registry |
+| `https://github.com/Jing494/agentic-env-presets` | GitHub default branch | git |
+| `github:Jing494/agentic-env-presets` | GitHub default branch | git |
+| `/absolute/path/to/agentic-env-presets` | a local checkout | path |
+
+The box asks for the **package name**, a **GitHub repository URL**, or a **local
+directory path** — exactly those three shapes. Things that look right but are not
+accepted, each confirmed against the installer's own parser:
+
+| Instead of | Reason it fails |
+|---|---|
+| `https://www.npmjs.com/package/dsh-agentic-env-presets` | the npm **web page** is not a repository URL. The installer reads it as a git host and the clone fails. Paste the bare package name instead. |
+| `npm install dsh-agentic-env-presets` / `dsh plugin add …` | a whole command line is not a spec; paste only the part **after** `add`. |
+| `Jing494/agentic-env-presets` | not a valid package name, and not a URL — use the full `https://github.com/…` form. |
+| `./agentic-env-presets` | a local path must be **absolute**. |
+
+Install scripts are never needed by this bundle, so the plugin page will not ask
+you to approve any build step. If a package it does install wants to run one, the
+page stops and asks first — that prompt is the gate, not an error.
+
+### From npm (recommended)
+
+```sh
+dsh plugin --profile web add dsh-agentic-env-presets
 ```
 
-Either way the bundle is registered as a profile layer. Restart the profile (or
-pick one of the two presets when creating a new session) and the picker shows
-`标准模式（中性环境）` and `PTC 模式（中性环境）` next to the shipped presets.
+Pinned to an exact version, if you would rather control when it moves:
+
+```sh
+dsh plugin --profile web add dsh-agentic-env-presets@1.1.0
+```
+
+### From GitHub
+
+Tracks the repository's default branch — you get whatever is committed, including
+changes that have not been released:
+
+```sh
+dsh plugin --profile web add https://github.com/Jing494/agentic-env-presets
+# or the shorthand pnpm accepts:
+dsh plugin --profile web add github:Jing494/agentic-env-presets
+```
+
+### From a local checkout
+
+For editing the presets or the rewriter itself. `link:` keeps the Host pointed at
+this working tree, so a change is visible without reinstalling:
+
+```sh
+dsh plugin --profile web add link:/path/to/agentic-env-presets
+```
+
+### After installing
+
+Both commands register the bundle as a profile layer automatically. `dsh` then
+writes it into `$DSH_HOME/profiles/<profile>/package.json` under
+`dsh.profile.bundles`; check with:
+
+```sh
+dsh --profile web --dump-config | grep -E 'preset-(standard|ptc)-env'
+```
+
+Restart the profile, then pick `标准模式（中性环境）` or `PTC 模式（中性环境）`
+when creating a **new** session — the picker lists them next to the shipped
+presets. Existing sessions keep the preset they started with.
+
+### Verify the install
+
+```sh
+dsh --profile web --dump-config | grep -c env-identity   # expect 2
+```
+
+If a bundle cannot load, `dsh` prints `skipping profile bundle "<name>": <reason>`
+and boots without it — the profile is never taken down by a bad bundle. Re-running
+`add` after fixing the cause reinstalls it.
+
+### Uninstall
+
+```sh
+dsh plugin --profile web remove dsh-agentic-env-presets
+```
+
+This drops the dependency and its `dsh.profile.bundles` entry in one step, so no
+stale layer is left behind. Sessions already running on one of these presets keep
+it until they restart.
 
 ## Deliverables
 

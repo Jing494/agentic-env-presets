@@ -7,6 +7,39 @@ exactly as they are, and change only one thing: the system prompt describes a pl
 Pick `标准模式（中性环境）` (`standard-env`) or `PTC 模式（中性环境）` (`ptc-env`) when
 creating a new session. Existing sessions keep the preset they started with.
 
+## Install
+
+Pick one of these — no build step, no native dependency, no install script.
+
+```sh
+# from npm (recommended) — pinned form: dsh-agentic-env-presets@1.1.0
+dsh plugin --profile web add dsh-agentic-env-presets
+
+# from GitHub (tracks the default branch, includes unreleased commits)
+dsh plugin --profile web add https://github.com/Jing494/agentic-env-presets
+
+# from a local checkout, live-linked for editing
+dsh plugin --profile web add link:/path/to/agentic-env-presets
+```
+
+Or use the install box on this page. It takes exactly three shapes: the **npm
+package name** (`dsh-agentic-env-presets`, optionally `@1.1.0`), a **GitHub
+repository URL** (`https://github.com/Jing494/agentic-env-presets`), or an
+**absolute local directory path**.
+
+It does **not** take the npm web page URL (`https://www.npmjs.com/package/…`),
+a whole command line (`dsh plugin add …`), the bare `owner/repo` pair, or a
+relative path.
+
+Check it loaded — the number should be `2`:
+
+```sh
+dsh --profile web --dump-config | grep -c env-identity
+```
+
+A bundle that cannot load is skipped at startup with a diagnostic naming the
+reason, and the profile still boots.
+
 ## What it does
 
 A preset cannot turn off the deployment-level `includeHarnessIdentity` switch, and it
