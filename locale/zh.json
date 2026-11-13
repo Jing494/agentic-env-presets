@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "通用 Agent 环境预设",
+    "description": "与 Standard、PTC 工具配置一致，但系统提示词只描述一个 agent 编码环境，不出现 harness 品牌表述。"
+  }
+}
