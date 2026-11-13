@@ -1,13 +1,33 @@
 {
-  "name": "@local/agentic-env-presets",
-  "version": "1.0.0",
-  "private": true,
+  "name": "dsh-agentic-env-presets",
+  "version": "1.1.0",
   "description": "Standard and PTC agent presets whose system prompt describes a plain agentic coding environment instead of a branded harness.",
+  "license": "MIT",
+  "author": "Jing494",
   "type": "module",
+  "main": "index.js",
+  "icon": "./icon.svg",
+  "keywords": [
+    "dsh",
+    "dsh-bundle",
+    "dsh-plugin",
+    "agent-preset",
+    "system-prompt",
+    "deepseek-harness"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jing494/agentic-env-presets.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Jing494/agentic-env-presets/issues"
+  },
+  "homepage": "https://github.com/Jing494/agentic-env-presets#readme",
   "exports": {
     ".": "./index.js",
     "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
   },
   "files": [
     "index.js",
@@ -16,10 +36,11 @@
     "presets-standard.patch.yml",
     "presets-ptc.patch.yml",
     "locale/*.json",
+    "docs/*.md",
     "icon.svg",
     "README.md",
-    "移植说明.md",
-    "PROMPT.md"
+    "README.zh.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
@@ -27,6 +48,14 @@
         "./presets-standard.patch.yml",
         "./presets-ptc.patch.yml"
       ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-system-prompt": ">=0.1.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
     }
   }
 }

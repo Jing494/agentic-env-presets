@@ -47,7 +47,7 @@
  * `complete: true` takeover (that would swallow tool guidance, plan mode, and
  * the SDK docs and break prompt caching), no regex replacement.
  *
- * @module @local/agentic-env-presets
+ * @module dsh-agentic-env-presets
  */
 
 /** Section slot owned by `@deepseek-ai/dsh-system-prompt` (`SECTION_ORDERS.HARNESS_IDENTITY`). */

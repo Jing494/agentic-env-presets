@@ -1,5 +1,12 @@
 # Agentic environment presets
 
+[![npm version](https://img.shields.io/npm/v/dsh-agentic-env-presets.svg)](https://www.npmjs.com/package/dsh-agentic-env-presets)
+[![npm downloads](https://img.shields.io/npm/dm/dsh-agentic-env-presets.svg)](https://www.npmjs.com/package/dsh-agentic-env-presets)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![DSH](https://img.shields.io/badge/DSH-0.1.7%20→%200.2.x-4D6BFE.svg)](https://github.com/Jing494/agentic-env-presets)
+
+[English](README.md) | [中文](README.zh.md)
+
 Two agent presets — **exact clones of the shipped Standard and PTC
 compositions** — whose system prompt describes a plain *agentic coding
 environment* instead of naming the harness. Tools, plan mode, compaction,
@@ -7,10 +14,19 @@ delegation, subagents, prompt caching and every config value are copied
 verbatim from the shipped declarations. The only composition change is one
 extra row, `env-identity`.
 
-This directory is a self-contained, portable recipe: the two patch files, the
-tiny prompt-rewriter plugin, a re-runnable verification script, and the
-reasoning. It is meant to be read and re-used on another harness/platform, not
-just installed here.
+## Install
+
+```sh
+# from npm
+dsh plugin --profile web add dsh-agentic-env-presets
+
+# or straight from the repository
+dsh plugin --profile web add https://github.com/Jing494/agentic-env-presets
+```
+
+Either way the bundle is registered as a profile layer. Restart the profile (or
+pick one of the two presets when creating a new session) and the picker shows
+`标准模式（中性环境）` and `PTC 模式（中性环境）` next to the shipped presets.
 
 ## Deliverables
 
@@ -23,40 +39,12 @@ just installed here.
 | [`gen-presets.mjs`](gen-presets.mjs) | Regenerates both patches from the shipped files (fidelity check/upgrade tool) |
 | [`package.json`](package.json) | Bundle manifest; `dsh.bundle.patch` lists both patch files |
 | [`icon.svg`](icon.svg), [`locale/en.json`](locale/en.json), [`locale/zh.json`](locale/zh.json) | Official-style icon and localized bundle title/description |
+| [`docs/DETAIL.md`](docs/DETAIL.md), [`docs/DETAIL.zh.md`](docs/DETAIL.zh.md) | The detail document each language's `meta.detail` points at |
+| [`README.zh.md`](README.zh.md) | Chinese README |
 | [`移植说明.md`](移植说明.md) | Chinese design/pitfall/porting notes |
 | [`PROMPT.md`](PROMPT.md) | The original task brief |
 
-## Display language and icon
-
-The two presets' display `name`/`description` are Chinese
-(`标准模式（中性环境）` / `PTC 模式（中性环境）`). This is deliberate: the
-shipped client translates the display text of **built-in presets only**
-(`standard`, `ptc`, `minimal`, `cordis`, and only while their declaration has
-no `name`). Custom presets show the declared string verbatim, so there is no
-built-in locale switch for them. Making it follow the client language would
-require an extra Client plugin that hooks the preset picker — out of scope for
-a two-row bundle. The **bundle's own** title/description (shown in Plugin
-Manager / Settings) does follow the client language, via the standard
-`locale/en.json` + `locale/zh.json` + `./locale/*.json` export.
-
-[`icon.svg`](icon.svg) follows the shipped plugin-art conventions: `36×36`
-with `viewBox="0 0 36 36"`, root `fill="none"`, a blue→indigo
-`linearGradient` pair named `dsh_plugin_art_R0a/R0b`, rounded rects, and a
-white `</>` glyph inside a terminal window. No outer frame or green fill.
-It is exported as `./icon` and listed in `files`.
-
-## Why a preset, and not a config flag
-
-The harness's system prompt is an ordered list of named **sections** plus
-**runtime-context** entries, assembled per model step by
-`@deepseek-ai/dsh-system-prompt`. The brand text is not one string in one
-place; it comes from three classes of source:
-
-| Source | What it contributes | Owner package |
-|---|---|---|
-| `harness:identity` section (order −1000) | `You are an AI agent powered by DeepSeek Harness.` | `dsh-system-prompt`, gated by `includeHarnessIdentity` |
-| `harness:source` (section 10000 / context 200) and `app:web-surface` (section 10100 / context 210) | "The runtime context names the DeepSeek Harness implementation checkout…", the Web GUI URL, and a long paragraph about rebuilding the GUI | `dsh-harness-dev-context` |
-| Passing prose in framework texts | `Current DSH file policy: …`, `The DSH file sandbox …`, `extend DSH itself` | `dsh-sandbox-policy`, `dsh-harness-dev-context` |
+## How the trick works
 
 `includeHarnessIdentity` is a **deployment-level** switch, and an agent preset
 cannot mount the prompt registry itself — so no preset can turn it off. What a
@@ -113,7 +101,7 @@ SDK docs and break prompt caching); no regex replacement.
 
 ```yaml
 - id: env-identity
-  name: '@local/agentic-env-presets'
+  name: 'dsh-agentic-env-presets'
   config:
     identity: You are an AI coding agent working inside an agentic coding environment.
     silenceDevContext: true        # optional, default true
@@ -124,6 +112,24 @@ SDK docs and break prompt caching); no regex replacement.
       - ['DSH file sandbox', 'file sandbox']
       - ['extend DSH itself', 'extend the environment itself']
 ```
+
+## Compatibility
+
+The manifest declares **no `engines.dsh`** on purpose. A narrow range such as
+`^0.2.2-rc.1` covers only `0.2.2`–`0.2.5`, so the bundle would be **rejected
+outright** the moment the engine moves past that window — exactly the failure
+mode where upgrading the engine forces upgrading the plugin first. Instead:
+
+- `peerDependencies` declares `@deepseek-ai/dsh-system-prompt": ">=0.1.0-0"`,
+  which `semver` matches with `includePrerelease`, so prerelease engines count.
+- The sections the plugin touches (`harness:identity`, `harness:source`,
+  `app:web-surface`) and the prompt API it calls (`getSectionOrder`,
+  `getContextOrder`, `system-prompt/assemble`) exist from `0.1.7` through
+  `0.2.x`, which is what the range is anchored on.
+
+If a future engine renames those sections, the bundle is **skipped at startup**
+with a diagnostic naming the missing piece, and the profile still boots — a bad
+bundle never takes the harness down with it.
 
 ## Verification
 
@@ -145,7 +151,6 @@ absolute-path ESM imports because `NODE_PATH` is ignored by ESM and this
 filesystem disallows symlinks):
 
 ```sh
-cd /storage/emulated/0/dsh/projects/agentic-env-presets
 node verify.mjs                      # or: node verify.mjs <path-to-dsh-installation>
 echo $?                              # 0 = all pass, 1 = failure
 ```
@@ -200,34 +205,24 @@ ALL 3 CASES PASS
 - **It is harness-shaped.** It relies on `ScopedLayers` shadowing by section
   name, `system-prompt/assemble` being a scope-filtered waterfall, and the
   preset→agent scope chain. On a platform without those seams, see the porting
-  section.
+  section in [`移植说明.md`](移植说明.md).
 - **The phrase table is deployment-specific.** Shipped wording is the default;
   a deployment that changed its prompts should edit `config.replacements`.
-  The whole model-visible brand inventory on this release is the four phrases
+  The whole model-visible brand inventory on this release is the five phrases
   in `BRAND_TOKENS` / `DEFAULT_REPLACEMENTS` — re-run `verify.mjs` after any
   framework upgrade.
-- **Reinstall / reload.** The bundle is linked from the workspace
-  (`link:/storage/emulated/0/dsh/projects/agentic-env-presets`), so the Host
-  resolves the live `index.js`. Changing JS after installation may still need
-  `remove_bundle` → `install_bundle` (or a Host restart) because the Host keeps
-  the loaded module generation. Changing only YAML patch files needs the same.
 
-## Installing here
+## Upgrading the clones
+
+Both patches are verbatim clones. After a DSH upgrade, regenerate and diff:
 
 ```sh
-# via plugin_manager (already done in the current `web` profile):
-plugin_manager install_bundle target: /storage/emulated/0/dsh/projects/agentic-env-presets
+node gen-presets.mjs <dsh-install>/node_modules/@deepseek-ai/dsh-web-app/presets
+diff -u <shipped>/standard.patch.yml presets-standard.patch.yml
 ```
 
-`plugin_manager list_plugins` then shows `preset-standard-env` and
-`preset-ptc-env` with `fiberPhase: active`. `dsh --profile web --dump-config`
-shows both rows. The two presets appear in the preset picker next to the
-shipped ones; pick one when creating a **new** session (existing sessions keep
-the preset revision they started with). This bundle is harness-level and has
-no mobile-app, desktop-shell, or platform-specific parts.
-
-To update the clones after a DSH upgrade, re-run `node gen-presets.mjs` with
-the new `dsh-web-app/presets` directory, diff the result, then reinstall.
+The diff must be exactly the header, the row id, the metadata block, and the
+single `env-identity` row.
 
 ### Changelog
 
@@ -258,31 +253,11 @@ silently changed behavior:
 | `tool-subagent` | `modelSelectionSettings: true` (not a config key) | `modelSelection: true` + `modelDiscovery: true` |
 | `tool-executor-ptc` (ptc only) | `@deepseek-ai/dsh-agent-tool-presentation` (`mode: ptc`) | `@deepseek-ai/dsh-tool-executor-ptc` |
 
-Verify after any DSH upgrade by diffing again — `diff` output must be exactly
-the header, the row id, the metadata block, and the single `env-identity` row:
+**2026-11-13 — publishable manifest.** Renamed to the unscoped
+`dsh-agentic-env-presets`, dropped `private`, added `license: MIT`,
+`repository`, `icon`, `keywords`, `main`, and the locale `meta.detail` docs;
+wide `peerDependencies` replaces any `engines.dsh` pin (see Compatibility).
 
-```sh
-diff -u <dsh-install>/node_modules/@deepseek-ai/dsh-web-app/presets/standard.patch.yml \
-        presets-standard.patch.yml
-```
+## License
 
-## Porting to another harness
-
-The pattern generalizes; only the names change:
-
-1. Find where the platform assembles the system prompt and whether it supports
-   *namespaced/scoped* section overrides. If it does, shadow the identity and
-   the platform-maintenance sections by name — that keeps the rest of the
-   prompt, tools, and caching untouched.
-2. If it only supports one final string (a single `systemPrompt` field), do the
-   same three steps at the terminal hook: replace the identity line, delete
-   the maintenance paragraphs, and scrub literal phrases. A `[from, to]` list
-   keeps this auditable and reversible.
-3. Keep the rewrite *per-agent*, not global: other sessions and other presets
-   should keep the original prompt so a maintainer agent can still talk about
-   the platform accurately.
-4. Never regex-replace brand tokens globally. `DeepSeek Harness`, `DSH_HOME`,
-   `dsh` as a CLI name, and socket paths all share substrings; literal phrase
-   pairs with an explicit ordering are the safe form.
-5. Verify with three cases (clean / clean-with-silencing-off / baseline-still-
-   branded), not with "installation succeeded".
+[MIT](LICENSE) © 2026 Jing494

@@ -13,7 +13,7 @@ const DEFAULT = '/data/data/com.dsharnessmobile.shell/files/usr/lib/node_modules
 const presetsDir = process.argv[2] ?? DEFAULT;
 
 const ENV_ROW = `          - id: env-identity
-            name: '@local/agentic-env-presets'
+            name: 'dsh-agentic-env-presets'
             config:
               identity: You are an AI coding agent working inside an agentic coding environment.
 `;

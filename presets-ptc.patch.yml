@@ -17,7 +17,7 @@
             config:
               prefix: You are a coding agent powered by the {{model}} model.
           - id: env-identity
-            name: '@local/agentic-env-presets'
+            name: 'dsh-agentic-env-presets'
             config:
               identity: You are an AI coding agent working inside an agentic coding environment.
           - id: agent-instructions
