@@ -1,0 +1,96 @@
+name: Publish to npm
+
+# A version tag is the release decision: pushing `v1.1.0` publishes 1.1.0.
+# A plain push to main runs nothing.
+on:
+  push:
+    tags:
+      - 'v*'
+  # Re-run a failed publish for an existing tag without re-tagging.
+  workflow_dispatch:
+
+permissions:
+  # Required for OIDC: lets this workflow exchange a short-lived GitHub identity
+  # token for npm publish rights. It grants no write access to any repository.
+  id-token: write
+  contents: read
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          # Never cache in a release build: a stale cache can publish the wrong tree.
+          package-manager-cache: false
+
+      - name: Check the tag matches package.json
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          echo "tag=$tag package.json=$pkg"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match package.json version $pkg"
+            exit 1
+          fi
+
+      - name: Check the manifest is publishable
+        run: |
+          node -e '
+            const p = require("./package.json");
+            const fail = (m) => { console.error("::error::" + m); process.exit(1); };
+            if (p.private) fail("package.json has private:true, npm would refuse to publish");
+            if (!p.license) fail("package.json has no license; npm refuses to publish");
+            if (!p.dsh?.bundle?.patch) fail("package.json declares no dsh.bundle.patch");
+            const files = [].concat(p.dsh.bundle.patch);
+            for (const f of files) {
+              if (!require("fs").existsSync(f)) fail("declared bundle patch is missing: " + f);
+            }
+            if (!p.files?.length) fail("package.json has no files list");
+            console.log("manifest ok: " + p.name + "@" + p.version + ", patches: " + files.join(", "));
+          '
+
+      - name: Check every published file exists
+        run: |
+          # A missing file named by `files` would ship an incomplete package silently.
+          npm pack --dry-run --json > pack.json
+          node -e '
+            const info = require("./pack.json")[0];
+            const names = info.files.map((f) => f.path);
+            const required = [
+              "LICENSE", "README.md", "README.zh.md", "index.js", "icon.svg",
+              "package.json", "presets-standard.patch.yml", "presets-ptc.patch.yml",
+              "locale/en.json", "locale/zh.json",
+              "docs/DETAIL.md", "docs/DETAIL.zh.md",
+            ];
+            const missing = required.filter((f) => !names.includes(f));
+            if (missing.length) {
+              console.error("::error::tarball is missing: " + missing.join(", "));
+              process.exit(1);
+            }
+            console.log("tarball ok: " + names.length + " files, " + info.size + " bytes packed");
+          '
+          rm -f pack.json
+
+      - name: Check the version is not already published
+        run: |
+          pkg="$(node -p "require('./package.json').name")"
+          ver="$(node -p "require('./package.json').version")"
+          if npm view "$pkg@$ver" version >/dev/null 2>&1; then
+            echo "::error::$pkg@$ver is already on the registry; bump the version first"
+            exit 1
+          fi
+          echo "$pkg@$ver is not published yet"
+
+      - name: Publish
+        # No NPM_TOKEN anywhere: npm authenticates this workflow through OIDC.
+        # Provenance proves the tarball was built from this commit.
+        run: npm publish --provenance --access public
