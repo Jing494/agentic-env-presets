@@ -78,6 +78,7 @@ const {
   apply: envApply,
   inject: envInject,
   name: envName,
+  scrubAssembly,
   scrubText,
 } = await importLocal('index.js');
 
@@ -820,6 +821,128 @@ for (const c of [
     `prompt: ${prompt.slice(0, 130)}`,
     `leaks : ${leaks(prompt).join(', ') || 'none'}`,
   ]);
+}
+
+// --------------------------------------------------------------- case 15
+{
+  // Bookkeeping used to be a Set of NAMES. A provider disposed and
+  // re-registered under the SAME name is a different object with different
+  // text, so the shadow was skipped and the brand came through verbatim.
+  const ctx = new Context();
+  ctx.plugin(SystemPrompt, { personaPrefix: '' });
+  await tick();
+  const presetKey = {};
+  const agentKey = {};
+  const preset = createScope(ctx, presetKey);
+  const first = preset.ctx.plugin({
+    inject: ['systemPrompt'],
+    apply(c) { c.systemPrompt.context({ name: 'probe:ctx', order: 500, text: 'clean text here' }); },
+  });
+  await tick();
+  preset.ctx.plugin({ apply: envApply, inject: envInject, name: envName });
+  await tick();
+  createScope(ctx, agentKey, { parent: presetKey });
+  await tick();
+  const snap = async () => {
+    const assembly = await ctx.systemPrompt.assemble({ scope: agentKey });
+    return renderContextSnapshot(ctx.systemPrompt.refreshContext(assembly, { scope: agentKey }));
+  };
+  const before = await snap();
+  await first.dispose?.();
+  await tick();
+  preset.ctx.plugin({
+    inject: ['systemPrompt'],
+    apply(c) { c.systemPrompt.context({ name: 'probe:ctx', order: 500, text: 'DeepSeek Harness context' }); },
+  });
+  await tick();
+  const after = await snap();
+  report('case 15: a re-registered context under the same name is re-scrubbed', {
+    cleanBefore: leaks(before).length === 0,
+    cleanAfterReRegister: leaks(after).length === 0,
+  }, [
+    `before: ${before.slice(-40)}`,
+    `after : ${after.slice(-40)}`,
+  ]);
+}
+
+// --------------------------------------------------------------- case 16
+{
+  // A provider (or section) living in THIS preset's own layer cannot be
+  // shadowed by name — the registration throws. It is patched in place
+  // instead, which must also be IDEMPOTENT: `system-prompt/change` fires on
+  // every registration, and wrapping a wrapper scrubs twice. The phrase table
+  // is not idempotent, so a doubly patched persona collapsed to
+  // "rules apply." while looking clean to every "does it contain a brand" test.
+  const ctx = new Context();
+  ctx.plugin(SystemPrompt, { personaPrefix: '' });
+  await tick();
+  const presetKey = {};
+  const agentKey = {};
+  const preset = createScope(ctx, presetKey);
+  preset.ctx.plugin(Persona, { prefix: 'DeepSeek Harness rules apply.', complete: true });
+  preset.ctx.plugin({
+    inject: ['systemPrompt'],
+    apply(c) { c.systemPrompt.context({ name: 'probe:ctx', order: 500, text: 'the DeepSeek Harness implementation' }); },
+  });
+  await tick();
+  preset.ctx.plugin({ apply: envApply, inject: envInject, name: envName });
+  await tick();
+  for (let i = 0; i < 8; i++) {
+    ctx.emit('system-prompt/change');
+    await tick(15);
+  }
+  createScope(ctx, agentKey, { parent: presetKey });
+  await tick();
+  const assembly = await ctx.systemPrompt.assemble({ scope: agentKey });
+  assembly.variables = { ...assembly.variables, model: 'm' };
+  const prompt = renderPrompt(assembly);
+  const snapshot = renderContextSnapshot(ctx.systemPrompt.refreshContext(assembly, { scope: agentKey }));
+  report('case 16: repeated rescans do not over-scrub an in-place patch', {
+    noBrand: leaks(prompt).length === 0 && leaks(snapshot).length === 0,
+    // The fix must not eat the sentence: the subject has to survive.
+    sentenceIntact: prompt.startsWith('the agentic coding environment rules apply.'),
+    contextIntact: snapshot.endsWith('the implementation'),
+  }, [
+    `prompt : ${prompt}`,
+    `context: ${snapshot.slice(-40)}`,
+  ]);
+}
+
+// --------------------------------------------------------------- case 17
+{
+  // scrubAssembly runs inside the per-request waterfall. A shape it does not
+  // recognise must pass through, never throw: failing here fails the step.
+  const shapes = [
+    null,
+    { contexts: [], variables: {} },
+    { sections: [], variables: {} },
+    { sections: [{ name: 'x' }], contexts: [{ name: 'y' }], variables: {} },
+    { sections: [{ name: 'x', text: 'DeepSeek Harness' }], contexts: [], variables: { m: 'DeepSeek Harness' } },
+  ];
+  const outcomes = shapes.map((shape) => {
+    try {
+      return scrubAssembly(shape, DEFAULT_REPLACEMENTS, true);
+    } catch (error) {
+      // Report WHY: a bare catch once hid a missing import and turned this
+      // case into a green light over a function that never ran.
+      return `THREW: ${error?.message ?? error}`;
+    }
+  });
+  const normal = outcomes[4];
+  if (!normal || normal === 'THREW') {
+    report('case 17: a malformed assembly degrades instead of throwing', {
+      noneThrew: false, nullPassedThrough: false, normalStillScrubbed: false,
+    }, ['normal shape missing from outcomes']);
+  } else {
+  report('case 17: a malformed assembly degrades instead of throwing', {
+    noneThrew: outcomes.every((o) => o !== 'THREW'),
+    nullPassedThrough: outcomes[0] === null,
+    normalStillScrubbed: normal.sections[0].text === 'the agentic coding environment'
+      && normal.variables.m === 'the agentic coding environment',
+  }, [
+    `outcomes: ${outcomes.map((o) => (o === 'THREW' ? 'THREW' : 'ok')).join(', ')}`,
+  ]);
+  }
 }
 
 // Counted, not hardcoded: adding a case must never leave this line lying.

@@ -90,7 +90,32 @@ const NEUTRAL = 'the agentic coding environment';
 const DEFAULT_REPLACEMENTS = [
   ['DSH（DeepSeek Harness）', NEUTRAL],
   ['DSH (DeepSeek Harness)', NEUTRAL],
-  ['DeepSeek Harness ', ''],
+  // The brand used as an ADJECTIVE ("the DeepSeek Harness implementation
+  // checkout") reads as a doubled article if it becomes "the the agentic
+  // coding environment …", so it collapses to nothing — but only when what
+  // follows is a word, never before punctuation or at the end of a sentence,
+  // which used to produce "Powered by and more." and a bare "context".
+  // Deleting the space-suffixed form is only safe when a noun clearly follows
+  // ("the DeepSeek Harness implementation checkout" -> "the implementation
+  // checkout"). It cannot be told apart from the brand being the SUBJECT
+  // ("DeepSeek Harness rules apply"), which used to collapse to the bare
+  // "rules apply." — so the deletion is restricted to the one shape it was
+  // written for: a definite article before the brand, and never a word that
+  // can be a verb or a sentence head.
+  ['DeepSeek Harness ', (after, before) => {
+    const adjectiveSlot = /\b(the|a|an|this|that|these|those|its|their|our|your|my|his|her)\s+$/i.test(before);
+    if (!adjectiveSlot) return undefined;
+    const word = /^([A-Za-z][\w-]*)/.exec(after);
+    if (word === null) return undefined;
+    const NOT_A_NOUN = new Set([
+      'and', 'or', 'but', 'nor', 'so', 'yet', 'then', 'than', 'as', 'if',
+      'is', 'was', 'are', 'were', 'be', 'been', 'being', 'has', 'have', 'had',
+      'does', 'do', 'did', 'can', 'could', 'will', 'would', 'shall', 'should',
+      'may', 'might', 'must', 'rules', 'matters', 'applies', 'applied',
+      'of', 'to', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'into',
+    ]);
+    return NOT_A_NOUN.has(word[1].toLowerCase()) ? undefined : '';
+  }],
   ['DeepSeek Harness', NEUTRAL],
   ['DSH Marketplace', 'plugin marketplace'],
   ['the DSH ecosystem', 'the plugin ecosystem'],
@@ -150,7 +175,26 @@ function scrubText(text, replacements, bareToken) {
   if (out.length === 0) return out;
   for (const pair of replacements) {
     if (!Array.isArray(pair) || typeof pair[0] !== 'string' || pair[0].length === 0) continue;
-    out = out.split(pair[0]).join(pair[1] ?? '');
+    const [, to] = pair;
+    if (typeof to === 'function') {
+      // Conditional replacement: `to` inspects the text that FOLLOWS the match
+      // and decides whether to delete it (''), keep a neutral noun, or leave
+      // the phrase untouched (undefined).
+      let at = out.indexOf(pair[0]);
+      if (at < 0) continue;
+      let result = '';
+      let last = 0;
+      while (at >= 0) {
+        const after = out.slice(at + pair[0].length);
+        const decision = to(after, out.slice(0, at));
+        result += out.slice(last, at) + (decision === undefined ? pair[0] : decision);
+        last = at + pair[0].length;
+        at = out.indexOf(pair[0], last);
+      }
+      out = result + out.slice(last);
+      continue;
+    }
+    out = out.split(pair[0]).join(to ?? '');
   }
   if (bareToken) {
     // Capitalise when the token began a sentence: a bare `DSH rules apply`
@@ -178,7 +222,10 @@ function normalizeReplacements(replacements) {
     throw new Error('env-identity: config.replacements must be an array of [from, to] pairs');
   }
   return replacements.filter(
-    (pair) => Array.isArray(pair) && typeof pair[0] === 'string' && pair[0].length > 0,
+    (pair) => Array.isArray(pair)
+      && typeof pair[0] === 'string'
+      && pair[0].length > 0
+      && (typeof pair[1] === 'string' || typeof pair[1] === 'function' || pair[1] === undefined),
   );
 }
 
@@ -191,6 +238,11 @@ function normalizeReplacements(replacements) {
  */
 function scrubAssembly(assembly, replacements, bareToken) {
   const rewrite = (text) => scrubText(text, replacements, bareToken);
+  // This runs on EVERY model step, inside the assembly waterfall. Throwing here
+  // would fail the whole request, so a shape this plugin does not recognise is
+  // passed through untouched rather than taken down. (A newer or older harness
+  // may add or drop fields; the scrub is cosmetic, the request is not.)
+  if (assembly === null || typeof assembly !== 'object') return assembly;
   // `variables` is the third thing an assembly carries, and `renderPrompt()`
   // resolves `{{name}}` references from it AFTER this waterfall returns — so a
   // value carrying a brand used to land in the prompt verbatim even though
@@ -202,12 +254,62 @@ function scrubAssembly(assembly, replacements, bareToken) {
       key,
       typeof value === 'string' ? rewrite(value) : value,
     ]));
+  const sections = Array.isArray(assembly.sections)
+    ? assembly.sections.map((section) => ({ ...section, text: rewrite(section?.text) }))
+    : assembly.sections;
+  const contexts = Array.isArray(assembly.contexts)
+    ? assembly.contexts.map((entry) => ({ ...entry, text: rewrite(entry?.text) }))
+    : assembly.contexts;
   return {
     ...assembly,
     ...variables === assembly.variables ? {} : { variables },
-    sections: assembly.sections.map((section) => ({ ...section, text: rewrite(section.text) })),
-    contexts: assembly.contexts.map((entry) => ({ ...entry, text: rewrite(entry.text) })),
+    sections,
+    contexts,
   };
+}
+
+/**
+ * Rewrite one context provider's `text` in place, with the same three guards
+ * the `complete: true` path uses.
+ *
+ * Needed when the provider sits in the very layer this preset registers into:
+ * the name is taken, so a shadowing registration throws by design. Both
+ * `assemble()` and `refreshContext()` re-read `.text` per request, so replacing
+ * that one property is enough — and it is undone on unload.
+ *
+ * @returns `undefined` on success, or a short reason why it refused.
+ */
+function patchProviderInPlace(ctx, state, table, name, provider) {
+  if (Object.isFrozen(provider)) return 'provider object is frozen';
+  // Never touch an object another layer can also resolve.
+  try {
+    let seen = 0;
+    const count = (candidate) => {
+      try {
+        for (const entry of candidate.contexts.values()) if (entry === provider) seen++;
+      } catch { /* unattachable table */ }
+    };
+    count(ctx.systemPrompt.layers.global);
+    if (ctx.systemPrompt.layers.scoped instanceof Map) {
+      for (const layer of ctx.systemPrompt.layers.scoped.values()) count(layer);
+    }
+    if (seen > 1) return 'provider object is shared across layers';
+  } catch { /* fall through to the patch */ }
+  // Idempotency comes from `state.contexts`, which records the provider OBJECT
+  // per name: a rescan sees the same object and skips before reaching here.
+  const original = provider.text;
+  const wrapped = typeof original === 'function'
+    ? (context) => scrubText(original(context), state.replacements, state.bareToken)
+    : scrubText(original, state.replacements, state.bareToken);
+  try {
+    provider.text = wrapped;
+  } catch (error) {
+    return String(error?.message ?? error);
+  }
+  ctx.effect(() => () => {
+    if (provider.text === wrapped) provider.text = original;
+  }, 'env-identity.context-in-place()');
+  return undefined;
 }
 
 /**
@@ -236,35 +338,77 @@ function scrubAssembly(assembly, replacements, bareToken) {
  */
 function shadowContexts(ctx, state) {
   const prompt = ctx.systemPrompt;
-  const globalContexts = prompt.layers?.global?.contexts;
-  if (globalContexts === undefined) return;
-  for (const [name, provider] of globalContexts.entries()) {
-    if (state.contexts.has(name)) continue;
-    // Layer 1b already owns this name in our scope; re-registering would throw.
-    if (state.owned.has(name)) {
-      state.contexts.add(name);
-      continue;
+  const tables = [];
+  try {
+    if (prompt.layers?.global?.contexts !== undefined) tables.push(prompt.layers.global.contexts);
+    // Scoped layers too: a preset-scoped provider (a sibling row) is just as
+    // reachable by the model, and the merge lets it win over the global one.
+    if (prompt.layers?.scoped instanceof Map) {
+      for (const layer of prompt.layers.scoped.values()) {
+        if (layer.contexts !== undefined) tables.push(layer.contexts);
+      }
     }
-    const text = provider.text;
-    if (typeof text !== 'function' && scrubText(text, state.replacements, state.bareToken) === text) {
-      // Nothing to rewrite and no live provider: leave the original in place.
-      state.contexts.add(name);
-      continue;
-    }
-    state.contexts.add(name);
+  } catch {
+    return;
+  }
+  for (const table of tables) {
+    let entries;
     try {
-      ctx.effect(() => prompt.context({
-        ...provider,
-        name,
-        text: (context) => scrubText(
-          typeof text === 'function' ? text(context) : text,
-          state.replacements,
-          state.bareToken,
-        ),
-      }), 'env-identity.shadow-context()');
-    } catch (error) {
-      state.failed.push(`context:${name}: ${String(error?.message ?? error)}`);
-      ctx.logger?.warn?.(`env-identity: could not shadow context "${name}": ${String(error)}`);
+      entries = [...table.entries()];
+    } catch {
+      continue;
+    }
+    for (const [name, provider] of entries) {
+      // The bookkeeping stores the PROVIDER OBJECT that was handled, not just
+      // the name. A provider disposed and re-registered under the same name is
+      // a different object with different text: skipping by name alone left
+      // its brand text unshadowed (measured — a re-registered
+      // `probe:ctx` came back "DeepSeek Harness context" verbatim).
+      if (state.contexts.get(name) === provider) continue;
+      // Layer 1b already owns this name in our scope; re-registering would throw.
+      if (state.owned.has(name)) {
+        state.contexts.set(name, provider);
+        continue;
+      }
+      const text = provider.text;
+      if (typeof text !== 'function' && scrubText(text, state.replacements, state.bareToken) === text) {
+        // Nothing to rewrite and no live provider: leave the original in place.
+        state.contexts.set(name, provider);
+        continue;
+      }
+      state.contexts.set(name, provider);
+      try {
+        ctx.effect(() => prompt.context({
+          ...provider,
+          name,
+          text: (context) => scrubText(
+            typeof text === 'function' ? text(context) : text,
+            state.replacements,
+            state.bareToken,
+          ),
+        }), 'env-identity.shadow-context()');
+      } catch (error) {
+        const message = String(error?.message ?? error);
+        if (!/already registered|duplicate/i.test(message)) {
+          state.failed.push(`context:${name}: ${message}`);
+          ctx.logger?.warn?.(`env-identity: could not shadow context "${name}": ${message}`);
+          continue;
+        }
+        // The provider lives in the SAME layer we mount into, so a same-name
+        // registration can never win. Rewrite the entry instead: `assemble()`
+        // and `refreshContext()` both read `resolveContext(provider)` on every
+        // request, which reads `.text` fresh. Measured: a same-layer provider
+        // re-registered under a name we had already handled came back with its
+        // brand text verbatim.
+        const problem = patchProviderInPlace(ctx, state, table, name, provider);
+        if (problem !== undefined) {
+          state.failed.push(`context:${name}: ${problem}`);
+          ctx.logger?.warn?.(
+            `env-identity: runtime context "${name}" is registered in this preset's own layer `
+            + `(${problem}); its text cannot be rewritten here`,
+          );
+        }
+      }
     }
   }
 }
@@ -329,7 +473,10 @@ function shadowTools(ctx, state) {
   const rewrite = (text) => scrubText(text, state.replacements, state.bareToken);
   const view = tools.view();
   for (const [name, registration] of view.registrations) {
-    if (name === 'run_code' || state.tools.has(name)) continue;
+    // Track the REGISTRATION OBJECT, not the name: a tool disposed and
+    // re-registered under the same name carries different documentation, and
+    // skipping by name would leave its brand text unshadowed.
+    if (name === 'run_code' || state.tools.get(name) === registration) continue;
     const definition = registration.definition;
     const description = typeof definition.description === 'string' ? definition.description : '';
     const scrubbedDescription = rewrite(description);
@@ -352,10 +499,10 @@ function shadowTools(ctx, state) {
       && JSON.stringify(output) !== JSON.stringify(definition.output);
     if (scrubbedDescription === description && !parametersChanged && !outputChanged) {
       // Nothing to rewrite: leave the original registration in place.
-      state.tools.add(name);
+      state.tools.set(name, registration);
       continue;
     }
-    state.tools.add(name);
+    state.tools.set(name, registration);
     try {
       ctx.effect(() => tools.register({
         ...definition,
@@ -364,8 +511,11 @@ function shadowTools(ctx, state) {
         ...output === undefined ? {} : { output },
       }, registration.when === undefined ? {} : { when: registration.when }), 'env-identity.shadow-tool()');
     } catch (error) {
-      state.failed.push(`tool:${name}: ${String(error?.message ?? error)}`);
-      ctx.logger?.warn?.(`env-identity: could not shadow tool "${name}": ${String(error)}`);
+      const message = String(error?.message ?? error);
+      if (!/already registered|duplicate/i.test(message)) {
+        state.failed.push(`tool:${name}: ${message}`);
+        ctx.logger?.warn?.(`env-identity: could not shadow tool "${name}": ${message}`);
+      }
     }
   }
 }
@@ -481,6 +631,10 @@ function shadowCompleteSections(ctx, state, scope) {
     }
     if (Object.isFrozen(section)) return 'section object is frozen';
     if (sharedObject(section)) return 'section object is shared across layers';
+    // Idempotency is enforced by the caller: `state.complete` records the
+    // section OBJECT per name, so a rescan on the same object never reaches
+    // here twice. (A separate per-object guard existed and was dead code —
+    // mutation-testing it proved nothing failed when it was removed.)
     const original = section.text;
     const wrapped = typeof original === 'function'
       ? (context) => rewrite(original(context))
@@ -579,8 +733,8 @@ function apply(ctx, config = {}) {
   const state = {
     replacements: pairs,
     bareToken: bareToken !== false,
-    /** Context names already handled (shadowed, skipped as clean, or owned). */
-    contexts: new Set(),
+    /** Context name -> the provider object already handled (identity, not name). */
+    contexts: new Map(),
     /** Context names THIS plugin owns in its own scope — never shadow again. */
     owned: new Set(),
     /** The identity section object this plugin registered (own-layer marker). */
@@ -589,8 +743,8 @@ function apply(ctx, config = {}) {
     complete: new Map(),
     /** Whether an unrewritable complete section should be reported. */
     warnComplete: config.completeSectionWarning !== false,
-    /** Tool names already handled. */
-    tools: new Set(),
+    /** Tool name -> the registration object already handled (identity, not name). */
+    tools: new Map(),
     /** Names that could not be shadowed, for the diagnostic surfaced below. */
     failed: [],
   };

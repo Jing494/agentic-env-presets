@@ -127,7 +127,7 @@ diagnostic naming the missing piece — the profile still boots.
 `verify.mjs` mounts the real prompt, tools, executor and agent packages, opens a preset
 scope, chains an agent scope beneath it, then follows the loop's real order — assemble,
 refresh, render, resolve tools, run the pre-step chain — and asserts on exact substrings
-across fifteen cases. Exit code 0 means all pass.
+across eighteen cases. Exit code 0 means all pass.
 
 ```sh
 node verify.mjs            # or: node verify.mjs <path-to-dsh-installation>
