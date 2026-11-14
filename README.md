@@ -34,7 +34,7 @@ The Web GUI's plugin manager installs the same three things through one text box
 | Paste this | Installs | Resolves as |
 |---|---|---|
 | `dsh-agentic-env-presets` | latest from npm | registry |
-| `dsh-agentic-env-presets@1.1.0` | that exact npm version | registry |
+| `dsh-agentic-env-presets@1.2.1` | that exact npm version | registry |
 | `https://github.com/Jing494/agentic-env-presets` | GitHub default branch | git |
 | `github:Jing494/agentic-env-presets` | GitHub default branch | git |
 | `/absolute/path/to/agentic-env-presets` | a local checkout | path |
@@ -63,7 +63,7 @@ dsh plugin --profile web add dsh-agentic-env-presets
 Pinned to an exact version, if you would rather control when it moves:
 
 ```sh
-dsh plugin --profile web add dsh-agentic-env-presets@1.1.0
+dsh plugin --profile web add dsh-agentic-env-presets@1.2.1
 ```
 
 ### From GitHub
@@ -173,7 +173,7 @@ real session still introduced itself with the brand name.
 | Surface | Owner | Seam |
 |---|---|---|
 | System-prompt sections | `dsh-system-prompt` | same-name `section()` |
-| Runtime-context entries | each owner; **re-resolved after assembly** | same-name `context()`, delegating wrapper |
+| Runtime-context entries | each owner; **re-resolved after assembly** | delegating wrapper in the **agent's** layer; in-place `text` for this preset's own |
 | Tool schema descriptions | `dsh-tools` | same-name `tools.register()`, forwarding the executables |
 | Loop-injected user messages (skill catalog) | `dsh-tool-skill` and friends | `agent/pre-step`, and it **must** be `{prepend:true}` |
 | Everything left over | anyone | `system-prompt/assemble` waterfall |
@@ -204,20 +204,30 @@ runtime dependencies, mounted as one row inside each preset. Five layers:
    `true`), register `harness:source` and `app:web-surface` — both the section
    and the runtime-context halves, four names total — with empty text. This is
    what removes the checkout path and GUI URL, without unmounting their owner.
-3. **Shadow the runtime contexts.** Every global context is re-registered under
-   its own name with a function `text` that calls the original provider and
-   scrubs the result, so `refreshContext()` resolves the scrubbed version while
-   the working directory, file policy and approval policy all survive.
-4. **Shadow tool descriptions.** Every branded tool is re-registered under its
-   own name with all three documentation surfaces rewritten: the top-level
-   `description`, every nested `description`/`title` inside `parameters`, and
-   the same fields inside `output.schema`. `enum`, `const`, `default`, `$ref`
-   and property NAMES are data or identifiers and stay byte-identical, as do
+3. **Shadow the runtime contexts.** The wrapper is installed in the **agent's
+   own layer**, not the preset's, and its `text` resolves whatever provider
+   currently wins the name before scrubbing. Doing it in the preset layer would
+   *occupy* the name: `dsh-base` mounts a global `tool-subagent`, every preset
+   re-declares it, and the preset's own row would then fail activation with
+   `already registered in this scope` — one failed row blocks every new session.
+   The agent's layer competes with nobody and still wins, because
+   `assemble()`/`refreshContext()` merge along the same scope chain. Providers
+   declared in the preset's *own* layer are rewritten in place instead, for the
+   same reason: re-registering them there cannot win.
+4. **Shadow tool descriptions.** Every branded tool gets all three
+   documentation surfaces rewritten: the top-level `description`, every nested
+   `description`/`title` inside `parameters`, and the same fields inside
+   `output.schema`. `enum`, `const`, `default`, `$ref` and property NAMES are
+   data or identifiers and stay byte-identical, as do
    `execute`, `render` and `when`. PTC mode inlines all three surfaces into its
    `tools:sdk` prompt section, so both executors are covered by the one fix.
-   The reserved `run_code` name is skipped. A shadow does **not** bypass a
-   subagent's `tools.restrict()`: a preset layer is an inherited layer and still
-   has to pass `admits()`.
+   Inherited tools are re-registered under their own name; tools declared in the
+   preset's **own** layer are rewritten in place, because `tools.view()` without
+   a scope reports the *global* view — empty in a deployment that disables its
+   tool rows globally and re-declares them per preset, which left every such
+   description unscrubbed. The reserved `run_code` name is skipped. A shadow
+   does **not** bypass a subagent's `tools.restrict()`: a preset layer is an
+   inherited layer and still has to pass `admits()`.
 5. **Rewrite a `complete: true` prompt.** Such a section is restored by
    `assemble()` **after** the waterfall, from the pre-waterfall snapshot, as the
    **entire** prompt — none of the four layers above can reach it. In an
@@ -438,6 +448,37 @@ The diff must be exactly the header, the row id, the metadata block, and the
 single `env-identity` row.
 
 ### Changelog
+
+**2026-11-14 — 1.2.1: stop claiming context names other presets own.**
+
+Creating a session failed outright:
+
+```
+agent-preset/invalid: prompt context "tool:subagent:depth" is already registered in this scope
+```
+
+The context scan walked **every** scoped layer, so a name owned by a different
+preset looked like an unshadowed global. This plugin then claimed it in its own
+(later, farther) layer, and the preset's own `tool-subagent` row — mounted after
+`env-identity` — could not register it in that same layer. One failed row fails
+the whole preset, so every new session was refused.
+
+Two more defects had the same root: asking a scoped registry the wrong question.
+
+- The same name can legitimately exist **globally and in the preset**.
+  Shadowing the global copy *from the preset layer* occupied the name and broke
+  the preset's own row. Inherited contexts are now shadowed in the **agent's**
+  layer; own-layer providers are rewritten in place. (Verified: without this
+  plugin, a global and a preset copy of one name coexist fine — so this was our
+  bug, not the presets'.)
+- `tools.view()` without a scope reports the **global** view, which is empty in
+  a deployment that disables its tool rows globally and re-declares them per
+  preset. Every preset-layer tool kept its brand text.
+
+And an agent-layer wrapper must resolve the **current** winner per call. Closing
+over the provider froze the text: a replaced provider never reached the model.
+
+`verify.mjs` grew to 24 cases, each with a mutation test that must fail.
 
 **2026-11-14 — 1.2.0: the scrub now reaches what the model actually reads.**
 

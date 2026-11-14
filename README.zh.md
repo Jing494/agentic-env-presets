@@ -29,7 +29,7 @@ Web GUI 的插件管理器用同一个输入框完成上面三种安装（**设�
 | 填这个 | 装到的东西 | 解析类型 |
 |---|---|---|
 | `dsh-agentic-env-presets` | npm 上的最新版 | registry |
-| `dsh-agentic-env-presets@1.1.0` | npm 上那个确切版本 | registry |
+| `dsh-agentic-env-presets@1.2.1` | npm 上那个确切版本 | registry |
 | `https://github.com/Jing494/agentic-env-presets` | GitHub 默认分支 | git |
 | `github:Jing494/agentic-env-presets` | GitHub 默认分支 | git |
 | `/absolute/path/to/agentic-env-presets` | 本地检出目录 | path |
@@ -56,7 +56,7 @@ dsh plugin --profile web add dsh-agentic-env-presets
 想自己控制升级时机的话，可以钉死版本：
 
 ```sh
-dsh plugin --profile web add dsh-agentic-env-presets@1.1.0
+dsh plugin --profile web add dsh-agentic-env-presets@1.2.1
 ```
 
 ### 从 GitHub 安装
@@ -117,7 +117,7 @@ dsh plugin --profile web remove dsh-agentic-env-presets
 | [`presets-standard.patch.yml`](presets-standard.patch.yml) | Standard 克隆，预设 id `standard-env`，Loader 行 `preset-standard-env` |
 | [`presets-ptc.patch.yml`](presets-ptc.patch.yml) | PTC 克隆（仅 `run_code` 执行器，workflow / 插件市场工具关闭），预设 id `ptc-env` |
 | [`index.js`](index.js) | `env-identity` 改写插件（五层，短语表与三个开关可配置） |
-| [`verify.mjs`](verify.mjs) | 针对真实官方插件的 20 组可复跑验证（含变异测试说明） |
+| [`verify.mjs`](verify.mjs) | 针对真实官方插件的 24 组可复跑验证（含变异测试说明） |
 | [`probe-restrict.mjs`](probe-restrict.mjs) | 证明工具同名遮蔽**不会**绕过子 agent 的 `tools.restrict()` |
 | [`probe-robust.mjs`](probe-robust.mjs) | 证明缺服务/缺字段时**降级为 no-op 而不抛错**（含对照实验） |
 | [`gen-presets.mjs`](gen-presets.mjs) | 从官方文件重新生成两个 patch（保真检查／升级工具） |
@@ -158,7 +158,7 @@ agent scope   每会话追加项
 | 面 | 归属 | 接缝 |
 |---|---|---|
 | 系统提示词 section | `dsh-system-prompt` | 同名 `section()` |
-| 运行时上下文 context | 各 owner 注册、**循环事后重算** | 同名 `context()` 委托包装 |
+| 运行时上下文 context | 各 owner 注册、**循环事后重算** | **agent 层**的委托包装；本预设自己那层则原地改 `text` |
 | 工具 schema 的 description | `dsh-tools` | 同名 `tools.register()`，转发可执行回调 |
 | 循环注入的 user message（技能目录） | `dsh-tool-skill` 等 | `agent/pre-step`，且必须 `{prepend:true}` |
 | 其余漏网 | 任意 | `system-prompt/assemble` 兜底 |
@@ -183,14 +183,22 @@ agent scope   每会话追加项
 2. **静默 harness 维护段落。** 当 `silenceDevContext`（默认 `true`）时，把
    `harness:source` 和 `app:web-surface`——section 与 runtime context 两半共四个
    名字——注册为空串。这一步移除 checkout 路径与 GUI URL，但不卸载它们的 owner。
-3. **遮蔽运行时上下文。** 每个全局 context 用同名 provider 再注册一遍，`text` 是函数：
-   调原 provider、擦洗结果。这样 `refreshContext()` 重算时拿到的就是擦干净的版本，
-   而工作目录、文件策略、审批策略这些有用信息照常保留。
-4. **遮蔽工具描述。** 每个描述带品牌的工具用同名定义再注册一遍，擦洗三个文档面：
-   顶层 `description`、`parameters` 里嵌套的 `description`/`title`、以及
-   `output.schema` 里的同类字段。`enum`/`const`/`default`/`$ref`/属性名是**数据**，
-   保持逐字节不变；`execute` / `render` / `when` 原样转发。PTC 模式把这三面都内联进
-   `tools:sdk`，所以两种执行器一并覆盖。保留名 `run_code` 跳过。
+3. **遮蔽运行时上下文。** 包装注册在 **agent 自己的层**里，而不是预设层；它的
+   `text` 每次都会先解析「当前赢下这个名字的 provider」再擦洗。放在预设层会**占用**
+   这个名字：`dsh-base` 挂了一个全局 `tool-subagent`，每个预设又都重新声明同一行，
+   于是预设自己的那一行会以 `already registered in this scope` 激活失败——一行失败
+   就会让整个预设不可用，所有新会话被拒。agent 层不跟任何人抢名字，而且仍然能赢，
+   因为 `assemble()` / `refreshContext()` 是沿同一条作用域链合并的。至于**本预设自己
+   那层**里声明的 provider，则改为就原地改 `text`——同样的理由：在那层重注册赢不了。
+   这样 `refreshContext()` 重算时拿到的就是擦干净的版本，而工作目录、文件策略、
+   审批策略这些有用信息照常保留。
+4. **遮蔽工具描述。** 擦洗三个文档面：顶层 `description`、`parameters` 里嵌套的
+   `description`/`title`、以及 `output.schema` 里的同类字段。`enum`/`const`/`default`/
+   `$ref`/属性名是**数据**，保持逐字节不变；`execute` / `render` / `when` 原样转发。
+   PTC 模式把这三面都内联进 `tools:sdk`，所以两种执行器一并覆盖。保留名 `run_code`
+   跳过。继承来的工具用同名再注册；**本预设自己那层**里的工具改为原地重写——因为
+   `tools.view()` 不带作用域时拿到的是**全局视图**，而在「工具行全局禁用、在每个预设里
+   重新声明」这种部署里全局视图是空的，于是这些描述一个都没被擦过。
    同名遮蔽**不会**绕过子 agent 的 `tools.restrict()`——预设层是继承层，仍受限。
 5. **改写 `complete: true` 的整段提示词。** 这种 section 在 waterfall **之后**被
    `assemble()` 从瀑布前的快照里原样恢复成**整个提示词**，上面四层都够不到它。
@@ -389,6 +397,33 @@ tool-subagent-list-agents (@deepseek-ai/dsh-tool-subagent-control/list-agents): 
 去掉 `private`，补 `license: MIT`、`repository`、`icon`、`keywords`、`main`，以及
 各语言 `meta.detail` 详情文档；用宽 `peerDependencies` 取代任何 `engines.dsh` 钉死
 （见「兼容性」）。
+
+**2026-11-14 —— 1.2.1：不再抢占别的预设拥有的 context 名字。**
+
+新建会话直接失败：
+
+```
+agent-preset/invalid: prompt context "tool:subagent:depth" is already registered in this scope
+```
+
+原因是 context 扫描遍历了**所有** scoped 层，于是别的预设拥有的名字看起来像
+"还没遮蔽的全局"。本插件把它抢注进自己（更靠后、更远）的层，而预设自己的
+`tool-subagent` 行——排在 `env-identity` 之后挂载——就再也注册不进同一层。一行失败
+即整个预设不可用，于是所有新会话被拒。
+
+另外两个缺陷同源：**问错了作用域注册表的对象。**
+
+- 同一个名字**全局有、预设里也有**是合法的。从预设层去遮蔽全局那份，等于占用了
+  名字，把预设自己的行搞挂。现在继承来的 context 遮蔽在 **agent 层**，本层 provider
+  则原地改写。（已验证：不装本插件时全局与预设同名共存完全正常——所以这是本插件
+  的 bug，不是预设的。）
+- `tools.view()` 不带作用域拿到的是**全局视图**，而在「工具行全局禁用、每个预设
+  重新声明」的部署里它是空的。于是预设层的工具描述一个都没被擦。
+
+另外 agent 层的包装必须**每次解析当前赢家**。闭包快照会把文本冻住：provider 被替换
+后新文案永远到不了模型。
+
+`verify.mjs` 扩到 24 组，每组都有必须失败的变异测试。
 
 **2026-11-14 —— 1.2.0：擦洗覆盖到真正会被模型读到的地方。**
 

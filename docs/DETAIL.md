@@ -12,7 +12,7 @@ creating a new session. Existing sessions keep the preset they started with.
 Pick one of these — no build step, no native dependency, no install script.
 
 ```sh
-# from npm (recommended) — pinned form: dsh-agentic-env-presets@1.1.0
+# from npm (recommended) — pinned form: dsh-agentic-env-presets@1.2.1
 dsh plugin --profile web add dsh-agentic-env-presets
 
 # from GitHub (tracks the default branch, includes unreleased commits)
@@ -23,7 +23,7 @@ dsh plugin --profile web add link:/path/to/agentic-env-presets
 ```
 
 Or use the install box on this page. It takes exactly three shapes: the **npm
-package name** (`dsh-agentic-env-presets`, optionally `@1.1.0`), a **GitHub
+package name** (`dsh-agentic-env-presets`, optionally `@1.2.1`), a **GitHub
 repository URL** (`https://github.com/Jing494/agentic-env-presets`), or an
 **absolute local directory path**.
 
@@ -53,13 +53,25 @@ Six layers, in priority order:
 1. **Replace the identity** — re-register `harness:identity` in the preset scope.
 2. **Silence harness-maintenance context** — register `harness:source` and
    `app:web-surface` (both the section and the runtime-context halves) with empty text.
-3. **Shadow the runtime contexts** — re-register each under its own name with a
-   `text` function that calls the original provider and scrubs the result. The loop
-   calls `refreshContext()` *after* the assembly waterfall and re-resolves every
-   provider, so a waterfall-only scrub leaves this surface untouched.
-4. **Shadow tool descriptions** — re-register each branded tool under its own name,
-   rewriting all three documentation surfaces: the top-level `description`, the nested
-   `description`/`title` inside `parameters`, **and the same fields inside
+3. **Shadow the runtime contexts** — install a delegating wrapper in the **agent's own
+   layer**, whose `text` resolves whichever provider currently wins the name and
+   scrubs the result. The loop calls `refreshContext()` *after* the assembly waterfall
+   and re-resolves every provider, so a waterfall-only scrub leaves this surface
+   untouched. The wrapper must live in the agent's layer, not the preset's: registering
+   the name in the preset *occupies* it, and a sibling row of the same preset that
+   declares that name then fails activation with `already registered in this scope` —
+   and one failed row blocks every new session on that preset. That shape is the stock
+   one (`dsh-base` mounts a global `tool-subagent`; every preset re-declares it).
+   Providers declared in the preset's *own* layer are rewritten in place instead, for
+   the same reason: re-registering them there cannot win. The wrapper also resolves the
+   current provider per call rather than closing over it, or a provider disposed and
+   re-registered under the same name would never reach the model.
+4. **Shadow tool descriptions** — inherited tools are re-registered under their own
+   name, and tools declared in the preset's **own** layer are rewritten in place,
+   because `tools.view()` without a scope reports the *global* view (empty in a
+   deployment that disables its tool rows globally and re-declares them per preset).
+   All three documentation surfaces are rewritten: the top-level `description`, the
+   nested `description`/`title` inside `parameters`, **and the same fields inside
    `output.schema`** (`enum`/`default`/property names stay untouched, since they are
    data), while forwarding every other callback. PTC mode inlines all three into
    `tools:sdk`, so both executors are covered.

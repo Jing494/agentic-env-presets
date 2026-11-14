@@ -11,7 +11,7 @@
 任选一种——没有构建步骤、没有原生依赖、没有安装脚本。
 
 ```sh
-# 从 npm 安装（推荐）——钉版本的写法：dsh-agentic-env-presets@1.1.0
+# 从 npm 安装（推荐）——钉版本的写法：dsh-agentic-env-presets@1.2.1
 dsh plugin --profile web add dsh-agentic-env-presets
 
 # 从 GitHub 安装（跟踪默认分支，会带上尚未发布的提交）
@@ -22,7 +22,7 @@ dsh plugin --profile web add link:/path/to/agentic-env-presets
 ```
 
 也可以直接用本页的安装框。它只接受三种形态：**npm 包名**
-（`dsh-agentic-env-presets`，可加 `@1.1.0`）、**GitHub 仓库地址**
+（`dsh-agentic-env-presets`，可加 `@1.2.1`）、**GitHub 仓库地址**
 （`https://github.com/Jing494/agentic-env-presets`）、或**绝对本地目录路径**。
 
 它**不接受** npm 网页地址（`https://www.npmjs.com/package/…`）、整条命令行
@@ -48,12 +48,21 @@ dsh --profile web --dump-config | grep -c env-identity
 1. **换身份句** —— 在 preset scope 内重新注册 `harness:identity`。
 2. **静默 harness 维护段落** —— 把 `harness:source` 和 `app:web-surface`（section 与
    runtime context 两半）注册为空串。
-3. **遮蔽运行时上下文** —— 同名再注册，`text` 是「调原 provider 再擦洗」的函数。循环
-   会在 waterfall **之后**调 `refreshContext()` 重解 provider，只有这样做才能盖住那一步。
-4. **遮蔽工具描述** —— 同名再注册工具，擦洗三个文档面：顶层 `description`、
-   `parameters` 里嵌套的 `description`/`title`、以及 `output.schema` 里的同类字段
-   （`enum`/`default`/属性名等数据保持不动），其余回调原样转发。PTC 把这三面都内联进
-   `tools:sdk`，所以两种执行器一并覆盖。
+3. **遮蔽运行时上下文** —— 包装注册在 **agent 自己的层**，`text` 每次先解析「当前赢下
+   这个名字的 provider」再擦洗。循环会在 waterfall **之后**调 `refreshContext()` 重解
+   provider，只有这样做才能盖住那一步。包装必须放 agent 层而不是预设层：在预设层注册
+   这个名字等于**占用**它，同预设里声明同一名字的兄弟行随后会以
+   `already registered in this scope` 激活失败，而**一行失败就让整个预设不可用**、
+   所有新会话被拒。这个形状恰恰是标准的：`dsh-base` 挂全局 `tool-subagent`，每个预设
+   又都重新声明一遍。本预设**自己那层**里的 provider 则改为原地改 `text`——同样的理由：
+   在那层重注册赢不了。另外包装是**每次解析当前赢家**而不是闭包快照，否则 provider 被
+   dispose 后同名重注册，新文案永远到不了模型。
+4. **遮蔽工具描述** —— 继承来的工具用同名再注册；**本预设自己那层**里的工具改为原地
+   重写，因为 `tools.view()` 不带作用域时拿到的是**全局视图**，而在「工具行全局禁用、
+   在每个预设里重新声明」这种部署里全局视图是空的。擦洗三个文档面：顶层
+   `description`、`parameters` 里嵌套的 `description`/`title`、以及 `output.schema`
+   里的同类字段（`enum`/`default`/属性名等数据保持不动），其余回调原样转发。PTC 把
+   这三面都内联进 `tools:sdk`，所以两种执行器一并覆盖。
 5. **改写 `complete: true` 的整段提示词** —— 这种 section 在 waterfall **之后**被
    `assemble()` 从瀑布前的快照恢复成**整个提示词**，上面四层都够不到。祖先层用同名
    再注册（保留 `complete`）；**本预设同一层**下同名注册必然抛错，于是改为**原地
