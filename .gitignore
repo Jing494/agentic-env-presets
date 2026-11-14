@@ -6,3 +6,9 @@ Thumbs.db
 .env
 .env.*
 *.tgz
+
+# Local-only notes: never published, never pushed.
+# CodeWiki.md   — maintenance manual for this package
+# REVIEW-*.md   — one-off review reports
+CodeWiki.md
+REVIEW-*.md

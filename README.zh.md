@@ -7,10 +7,13 @@
 
 [English](README.md) | [中文](README.zh.md)
 
-两套预设——**官方 Standard 与 PTC 组合的逐字克隆**——把系统提示词里的品牌表述换成
-一个中性的 *agent 编码环境* 说法。工具、计划模式、压缩、委派、子代理、prompt
-caching 以及每一个配置值都从官方声明逐字复制。组合上唯一的改动是多了
-`env-identity` 这一行。
+两套预设——**官方 Standard 与 PTC 组合的逐字克隆**——把模型能读到的品牌表述换成一个
+中性的 *agent 编码环境* 说法。工具、计划模式、压缩、委派、子代理、prompt caching
+以及每一个配置值都从官方声明逐字复制。组合上唯一的改动是多了 `env-identity` 这一行。
+
+"模型能读到的"比想象中宽：除了系统提示词，还包括**运行时上下文**、**工具 schema 的
+description**、以及**每步注入的技能目录消息**。四类文本分属四个子系统，所以插件是
+五层而不是一层——详见[原理](#原理)。
 
 ## 安装
 
@@ -113,8 +116,10 @@ dsh plugin --profile web remove dsh-agentic-env-presets
 |---|---|
 | [`presets-standard.patch.yml`](presets-standard.patch.yml) | Standard 克隆，预设 id `standard-env`，Loader 行 `preset-standard-env` |
 | [`presets-ptc.patch.yml`](presets-ptc.patch.yml) | PTC 克隆（仅 `run_code` 执行器，workflow / 插件市场工具关闭），预设 id `ptc-env` |
-| [`index.js`](index.js) | `env-identity` 改写插件（三层，短语表可配置） |
-| [`verify.mjs`](verify.mjs) | 针对真实官方插件的可复跑验证 |
+| [`index.js`](index.js) | `env-identity` 改写插件（五层，短语表与三个开关可配置） |
+| [`verify.mjs`](verify.mjs) | 针对真实官方插件的 15 组可复跑验证（含变异测试说明） |
+| [`probe-restrict.mjs`](probe-restrict.mjs) | 证明工具同名遮蔽**不会**绕过子 agent 的 `tools.restrict()` |
+| [`probe-robust.mjs`](probe-robust.mjs) | 证明缺服务/缺字段时**降级为 no-op 而不抛错**（含对照实验） |
 | [`gen-presets.mjs`](gen-presets.mjs) | 从官方文件重新生成两个 patch（保真检查／升级工具） |
 | [`package.json`](package.json) | bundle 清单；`dsh.bundle.patch` 列出两个 patch 文件 |
 | [`icon.svg`](icon.svg)、[`locale/en.json`](locale/en.json)、[`locale/zh.json`](locale/zh.json) | 官方风格图标与本地化标题／描述 |
@@ -134,9 +139,10 @@ dsh plugin --profile web remove dsh-agentic-env-presets
 agent scope 链到预设的 standing scope。整个技巧就是这样：
 
 ```
-global 层     harness:identity, 各工具指引, harness:source, app:web-surface …
+global 层     harness:identity, 各工具指引, harness:source, app:web-surface, sandbox:policy …
       ▲ 被同名遮蔽
-preset 层     harness:identity（新文案）, harness:source = "", app:web-surface = ""
+preset 层     harness:identity（新文案）, harness:source = "", app:web-surface = "",
+              sandbox:policy = 委托包装, 各工具 = 换 description 的同名定义
       ▲ 被继承
 agent scope   每会话追加项
 ```
@@ -144,29 +150,80 @@ agent scope   每会话追加项
 空遮蔽项仍然作为 assembly 条目存在，但 `renderPrompt` 会丢弃空 section，空 context
 在拼接快照时消失。全局 owner 仍挂载给其他所有预设。
 
+### 品牌字样在**五个**地方，不在一个地方
+
+这一点是 1.1.1 的核心疏漏：它只盖住了系统提示词的两个 section，于是真实会话里模型
+仍然自报品牌。
+
+| 面 | 归属 | 接缝 |
+|---|---|---|
+| 系统提示词 section | `dsh-system-prompt` | 同名 `section()` |
+| 运行时上下文 context | 各 owner 注册、**循环事后重算** | 同名 `context()` 委托包装 |
+| 工具 schema 的 description | `dsh-tools` | 同名 `tools.register()`，转发可执行回调 |
+| 循环注入的 user message（技能目录） | `dsh-tool-skill` 等 | `agent/pre-step`，且必须 `{prepend:true}` |
+| 其余漏网 | 任意 | `system-prompt/assemble` 兜底 |
+
+其中两条尤其反直觉，值得单独说：
+
+- **运行时上下文在 waterfall 之后还会被重算。** `dsh-agent-loop` 的顺序是
+  `assemble()` → waterfall → `refreshContext()` → 渲染。`refreshContext()` 重新解析
+  所有 context provider，所以只在 waterfall 里擦 context 的写法，单测看着完美，真实
+  请求里原样回来。本包改为同名委托包装，让重算解析到我们的函数。
+- **技能目录是在 `next()` 之后追加的。** 所以 `agent/pre-step` 监听器必须是
+  **最外层**（`{prepend:true}`）；按默认内层注册会先跑完、扫到空目录、什么也没擦，
+  然后目录才带着品牌被追加进来。这一条在 `verify.mjs` 里有专门的用例。
+
 ## 插件做了什么（`index.js`）
 
 它是一个普通的 Cordis 函数插件（`name`、`inject`、`apply`），**无运行时依赖**，作为
-每个预设里的一行挂载。三层，按优先级：
+每个预设里的一行挂载。五层：
 
 1. **换身份句。** 在 preset scope 内用 `config.identity` 注册 `harness:identity`。
    同名 ⇒ 全局那条被替换，而不是重复。
 2. **静默 harness 维护段落。** 当 `silenceDevContext`（默认 `true`）时，把
    `harness:source` 和 `app:web-surface`——section 与 runtime context 两半共四个
    名字——注册为空串。这一步移除 checkout 路径与 GUI URL，但不卸载它们的 owner。
-3. **擦除残留 token。** 一个 scope 过滤的 `system-prompt/assemble` waterfall 监听器，
-   用 `config.replacements` 里的字面 `[from, to]` 短语对改写每个已装配的 section 与
-   context。字面 `split/join`，**绝不用正则**，所以 `$DSH_HOME`、`DSH_ENV_PREFIX`、
-   `dsh` 这个 CLI 名（`only dsh web injects …`）和 socket 路径永远不会被改坏。
-   带尾空格的 `DeepSeek Harness ` 短语先跑，于是 "the DeepSeek Harness implementation
-   checkout" 变成 "the implementation checkout"，而不是 "the the …"。
-   `extend DSH itself` 单独成对，因为它是自指而非标识符。
+3. **遮蔽运行时上下文。** 每个全局 context 用同名 provider 再注册一遍，`text` 是函数：
+   调原 provider、擦洗结果。这样 `refreshContext()` 重算时拿到的就是擦干净的版本，
+   而工作目录、文件策略、审批策略这些有用信息照常保留。
+4. **遮蔽工具描述。** 每个描述带品牌的工具用同名定义再注册一遍，擦洗三个文档面：
+   顶层 `description`、`parameters` 里嵌套的 `description`/`title`、以及
+   `output.schema` 里的同类字段。`enum`/`const`/`default`/`$ref`/属性名是**数据**，
+   保持逐字节不变；`execute` / `render` / `when` 原样转发。PTC 模式把这三面都内联进
+   `tools:sdk`，所以两种执行器一并覆盖。保留名 `run_code` 跳过。
+   同名遮蔽**不会**绕过子 agent 的 `tools.restrict()`——预设层是继承层，仍受限。
+5. **改写 `complete: true` 的整段提示词。** 这种 section 在 waterfall **之后**被
+   `assemble()` 从瀑布前的快照里原样恢复成**整个提示词**，上面四层都够不到它。
+   放在祖先层时用同名再注册（保留 `complete`）；放在**本预设同一层**时同名注册必然
+   抛错，于是改为**原地重写该 section 对象**（先确认未被冻结、未被多层共享，卸载时
+   还原）。官方 `minimal` 预设就设置了 `complete: true`，所以这是实际路径而非理论。
+6. **擦除残留 token。** 一个 scope 过滤的 `system-prompt/assemble` waterfall 监听器
+   兜底，加一条 `agent/pre-step`（最外层）改写**技能目录与技能正文**消息
+   （`skill-catalog` / `skill-invocation` 等），并靠消息 id 排除用户自己的发言。
+
+第 5 层的短语表用字面 `split/join`，**顺序有意义**（长短语在前），带尾空格的
+`DeepSeek Harness ` 先跑，于是 "the DeepSeek Harness implementation checkout" 变成
+"the implementation checkout"，而不是 "the the …"。
+
+裸 `DSH` 散文由一条**带三重断言的窄正则** `(?<![\w$.\-])DSH(?![\w\-])` 兜底。
+它与 1.1.1 的"绝不用正则"原则相反，但实践证明纯短语表永远滞后于插件作者的措辞。
+替换后若处在句首，首字母会大写（`DSH rules apply` → `The … rules apply`），
+但**中文语境不加英文冠词**（`DSH 的规则` 不会变成 `The … 的规则`）。
+
+断言保证这些**一个字节都不动**：
+
+```
+$DSH_HOME   DSH_ENV_PREFIX   __DSH_BOOT__   engines.dsh
+@deepseek-ai/dsh-tool-bash   DSH-1234   myDSHThing
+```
 
 监听器返回的是 section/context 条目的**拷贝**。在 waterfall 返回前，assembly 与注册表
 共享对象，原地修改会泄漏到其他 agent 之后的请求里。
 
-刻意**不做**：不全局改写框架提示词字符串；不用 `complete: true` section（那会吞掉
-工具指引、计划模式和 SDK 说明，并让 prompt cache 失效）；不用正则替换。
+刻意**不做**：不全局改写框架提示词字符串；**不把**预设切换成 `complete: true` 整段
+接管（那会吞掉工具指引、计划模式和 SDK 说明，并让 prompt cache 失效——但上游这样配了，
+我们必须能擦掉它，见第 5 层）；不改工具**名**（那是调用面，改名直接打断工具调用）；
+不改 `$DSH_*` 等标识符。
 
 ### 配置
 
@@ -176,13 +233,21 @@ agent scope   每会话追加项
   config:
     identity: You are an AI coding agent working inside an agentic coding environment.
     silenceDevContext: true        # 可选，默认 true
-    replacements:                  # 可选，默认见 DEFAULT_REPLACEMENTS
+    scrubToolDescriptions: true    # 可选，默认 true；关掉则只擦提示词与上下文
+    scrubLoopMessages: true        # 可选，默认 true；关掉则不碰上下文/技能目录
+    bareToken: true                # 可选，默认 true；关掉则只跑短语表，不跑裸 DSH 正则
+    replacements:                  # 可选，默认见 DEFAULT_REPLACEMENTS；整表替换
+      - ['DSH（DeepSeek Harness）', 'the agentic coding environment']
       - ['DeepSeek Harness ', '']
       - ['DeepSeek Harness', 'the agentic coding environment']
+      - ['DSH Marketplace', 'plugin marketplace']
       - ['DSH file policy', 'file policy']
       - ['DSH file sandbox', 'file sandbox']
       - ['extend DSH itself', 'extend the environment itself']
 ```
+
+三个开关是为**排障与移植**留的，不是日常配置：怀疑某一层误伤正常文本时，逐层关掉就能
+定位。`bareToken: false` 保留"纯字面短语"的旧行为。
 
 ## 兼容性
 
@@ -201,16 +266,25 @@ agent scope   每会话追加项
 
 ## 验证
 
-`verify.mjs` 挂载**真实的** `dsh-system-prompt`、`dsh-harness-dev-context` 和
-`dsh-persona` 包，外加一个忠实还原的 `dsh-sandbox-policy` runtime context 桩，以及
-`dsh-harness-dev-context` 注入的两个 Host 服务桩（`webApp`、`sessionProjections`）。
-它开一个 preset scope，在其下链一个 agent scope，装配并渲染，然后做**精确子串**断言：
+`verify.mjs` 挂载**真实的** `dsh-system-prompt`、`dsh-harness-dev-context`、
+`dsh-persona`、`dsh-tools`、`dsh-tool-executor-native`、`dsh-agent`、`dsh-scope`，
+外加 `dsh-harness-dev-context` 注入的两个 Host 服务桩（`webApp`、`sessionProjections`）。
+它开一个 preset scope，在其下链一个 agent scope，然后按**循环真实的顺序**装配、刷新、
+渲染、解析工具、跑 pre-step，做**精确子串**断言。十五组：
 
 | 用例 | 断言 |
 |---|---|
-| 新预设，默认配置 | 身份句是新文案；维护 section/context 为空；提示词与 context 中**无品牌短语**；无重复的 "the the" |
-| 新预设，`silenceDevContext: false` | 维护段落仍在（这正是关闭静默的含义），但**擦除层仍清掉所有品牌短语**，无 "the the" |
-| 官方预设（基线，无 env 行） | 品牌短语**仍在**——证明没有泄漏到全局／部署层 |
+| 1 默认配置 | 身份句是新文案；维护 section/context 为空；四个面都**无品牌字样**；无 "the the" |
+| 2 `silenceDevContext: false` | 维护段落仍在（这正是关闭静默的含义），但**擦除层仍清掉品牌** |
+| 3 官方预设（基线，无 env 行） | 品牌字样**仍在**——证明没有泄漏到全局／部署层 |
+| 4 `refreshContext()` 之后 | 循环会**在 waterfall 之后**重解 context；此时仍必须干净，且文件策略文本没被清空 |
+| 5 工具 schema | 顶层描述**与 `parameters` 里的嵌套文档**都被擦；标识符一字不动；`enum`/`default`/属性名等**数据**保留；基线的工具描述仍是原文 |
+| 6 技能目录 | 目录消息被**真的改写**（不是"没跑到"），且 `source.entries` 未被污染 |
+| 7 标识符安全 | `$DSH_HOME`、`__DSH_BOOT__`、`engines.dsh`、`DSH-1234` 等原样保留 |
+| 8 挂载顺序无关 | 同一组插件、**两种挂载顺序**都必须干净——遮蔽扫描曾被自己的空遮蔽打断，只在其中一种顺序下泄漏 |
+| 5b PTC `tools:sdk` 渲染 | 用**真实的 `renderToolsSdkPy()`** 渲染遮蔽后的定义，散文必须干净，而 `enum` 数据（`Literal["DSH", …]`）必须保留 |
+| 9 `complete: true` 的两种摆放 | 放在**祖先层**要能同名遮蔽；放在**本预设同一层**（`dsh-persona` 就是同层兄弟行）时同名注册必然抛错，必须改为**原地重写 section 对象**。两种摆放都不得泄漏，且修好后不再打 warn |
+| 10 措辞可读 | 句首替换后首字母大写；句中仍小写；中文前后**不加**英文冠词；标识符一字节不变 |
 
 在任何目录都能跑（它自己定位 dsh 安装目录，并用绝对路径 ESM import，因为 ESM 不认
 `NODE_PATH`，且本文件系统不允许建符号链接）：
@@ -220,39 +294,33 @@ node verify.mjs                      # 或：node verify.mjs <dsh 安装目录>
 echo $?                              # 0 = 全部通过，1 = 失败
 ```
 
-本机实测输出（三组全部 `PASS`）：
+每组都会把该面实际送进模型的文本打出来，便于肉眼复核。
 
-```
-===== env preset (default config) =====
---- prompt ---
-You are an AI coding agent working inside an agentic coding environment.
+### 一定要做变异测试
 
-You are a coding agent powered by the deepseek-v4.1-flash model.
---- runtime context snapshot ---
-Current runtime context. This snapshot supersedes earlier runtime-context snapshots.
+一套永远通过的测试等于没有测试。至少跑这两条，**期望都是 FAIL**：
 
-Current file policy: danger-full-access. The file sandbox does not restrict file modifications by available operations.
-brand tokens found: none
-brand=ok identity=ok maintenance=ok noDoubledWord=ok
-ASSERTION: PASS
+```sh
+# 去掉 prepend：技能目录用例（6）必须失败
+sed -i "s/onPreStep, { prepend: true }/onPreStep/" index.js && node verify.mjs
 
-===== env preset (silenceDevContext: false) =====
-… "The runtime context names the implementation checkout. … extend the environment itself."
-… "Current implementation checkout: …" / "Current Web GUI URL: …"
-brand tokens found: none
-brand=ok identity=ok maintenance=ok noDoubledWord=ok
-ASSERTION: PASS
+# 停掉上下文遮蔽：刷新用例（4）必须失败
+sed -i "s/^    rescanContexts();/    \/\/ rescanContexts();/" index.js && node verify.mjs
 
-===== baseline preset (no env row) =====
-You are an AI agent powered by DeepSeek Harness.
-… The runtime context names the DeepSeek Harness implementation checkout …
-brand tokens found: DeepSeek Harness, DSH file policy, DSH file sandbox, extend DSH itself
-brand=ok identity=ok maintenance=ok noDoubledWord=ok
-ASSERTION: PASS
-
-ALL 3 CASES PASS
+git checkout index.js    # 复原
 ```
 
+这两条都已在 1.2.0 上实测：分别精确击穿用例 6 与用例 4，其余用例保持通过。
+
+另外两个探针覆盖"不炸"这一面，退出码 0 表示通过：
+
+```sh
+node probe-restrict.mjs   # 遮蔽不会复活被 tools.restrict() 禁掉的工具
+node probe-robust.mjs     # 缺 tools 服务 / 缺 layers / 空配置 / provider 自己抛错
+```
+
+`probe-robust.mjs` 的最后一个用例是**对照实验**：某个 context provider 自己会抛错时，
+不装本插件也照样抛——它断言的是"装与不装行为一致"，而不是"绝不抛错"。
 ## 限制／改不了什么
 
 - **这只改模型看到的文字，不改产品。** Web GUI、CLI help（`dsh --help`）、插件管理器、
@@ -263,11 +331,22 @@ ALL 3 CASES PASS
 - **空遮蔽 section 仍然存在。** 它们渲染为空，但 `SystemPrompt.assemble()` 会把它们
   列出来；检查原始 assembly 的工具会看到两条空项。这是有意为之，无害。
 - **它与 harness 的形状绑定。** 它依赖 `ScopedLayers` 的同名遮蔽、
-  `system-prompt/assemble` 是 scope 过滤的 waterfall、以及预设→agent 的 scope 链。
-  在没有这些接缝的平台上，见 [`移植说明.md`](移植说明.md) 的移植章节。
+  `system-prompt/assemble` 是 scope 过滤的 waterfall、`refreshContext()` 走 registry、
+  `agent/pre-step` 的 waterfall 顺序、以及预设→agent 的 scope 链。在没有这些接缝的
+  平台上，见 [`移植说明.md`](移植说明.md) 的移植章节。
+- ~~工具参数里的子描述没被擦~~：**1.2.0 已修复**。现在递归擦 `parameters` 里的
+  `description`/`title`，同时**不动** `enum`/`const`/`default`/`$ref` 与属性名——
+  那些是数据或标识符，改了会让模型产出的参数对不上。
+- ~~技能正文没被擦~~：**1.2.0 已修复**。`skill-invocation` 与技能目录走同一个
+  `agent/pre-step` 钩子，正文同样被擦洗（见 `verify.mjs` case 6）。
+- ~~`complete: true` 的整段接管~~：**1.2.0 已修**。祖先层用同名遮蔽，同层用原地
+  重写 section 对象（见 `verify.mjs` case 9）。只有在对象被 `Object.freeze()` 或被
+  多个层共享时才会退回"打 warn 不修"——那两种情况会明确写日志，不会静默。
+- **技能的名字**（如 `dsh-plugin-store`）与磁盘上的 `SKILL.md` 文件本身没改。前者是
+  调用面，改名会打断 `skill()` 调用；后者不在提示词层，本包只在它进入上下文时擦洗。
 - **短语表是部署相关的。** 官方措辞是默认值；改过自己提示词的部署应编辑
-  `config.replacements`。本版本模型可见的品牌清单就是 `BRAND_TOKENS` /
-  `DEFAULT_REPLACEMENTS` 里的那五条——框架升级后请重跑 `verify.mjs`。
+  `config.replacements`。裸 `DSH` 由那条带断言的窄正则兜底，新增品牌词请加进表里——
+  框架升级后请重跑 `verify.mjs`，并跑一次变异测试。
 
 ## 升级克隆
 
@@ -310,6 +389,46 @@ tool-subagent-list-agents (@deepseek-ai/dsh-tool-subagent-control/list-agents): 
 去掉 `private`，补 `license: MIT`、`repository`、`icon`、`keywords`、`main`，以及
 各语言 `meta.detail` 详情文档；用宽 `peerDependencies` 取代任何 `engines.dsh` 钉死
 （见「兼容性」）。
+
+**2026-11-14 —— 1.2.0：擦洗覆盖到真正会被模型读到的地方。**
+
+1.1.1 在有 `standard-env` 预设的会话里，模型仍然自报「运行在 DSH（DeepSeek
+Harness）里」。从会话日志取出那次请求后，确认泄漏来自 **1.1.1 完全没触及的三个面**：
+
+| 面 | 实测 |
+|---|---|
+| 运行时上下文 | `Current DSH file policy: … the DSH file sandbox …` |
+| 工具 schema 的 description | 11 处，如 `Search the DSH Marketplace catalogue of DeepSeek Harness plugins` |
+| 技能目录 user message | 3 处，`Find and install DeepSeek Harness (DSH) plugins` |
+
+而它**自以为**盖住的运行时上下文，其实只盖住了 `assemble()` 那一瞬间：
+`dsh-agent-loop` 会在 waterfall 之后调 `refreshContext()` 重解全部 provider，
+把原句原样放回来。旧 `verify.mjs` 断言的是 `assemble()` 的产物，所以三组全 PASS。
+
+修复与加固：
+
+- 新增**上下文同名委托遮蔽**，让 `refreshContext()` 解析到擦洗后的函数。
+- 新增**工具同名遮蔽**（转发 `execute`/`output`/`when`），顺带修好 PTC 模式把工具
+  文档内联进 `tools:sdk` 的同类泄漏。
+- 新增**技能目录擦洗**，监听器用 `{prepend:true}` 注册在最外层——技能目录是在
+  `next()` 之后才追加的，注册在默认内层会静默失效。
+- 裸 `DSH` 改用带断言的窄正则兜底，`$DSH_HOME` 这类标识符逐字保留。
+- `verify.mjs` 从 3 组扩到 15 组，覆盖上述每一条，并用变异测试证明它们真的会失败。
+  其中第 8 组来自安装后 e2e 实测：遮蔽扫描曾被自己的空遮蔽打断，导致**挂载顺序**决定
+  是否泄漏——单一顺序的测试套件测不出这类 bug。
+
+**2026-11-14（同日，兼容性核查后）—— 补两个真缺口，9 组用例。**
+
+核查引擎更新成本与跨版本兼容时，实测又抓到两个面：
+
+| 缺口 | 表现 |
+|---|---|
+| `output.schema` 里的文档 | `dsh-tools` 不把它给模型，但 PTC 的 `renderSdk()` 会渲染进 `tools:sdk`，嵌套 `description` 变成 `#` 注释 |
+| 技能**正文** | `skill-invocation` 与技能目录由同一个 `agent/pre-step` 追加，之前只擦了目录 |
+
+同时实测：0.1.7-rc.2 与 0.2.2-rc.3 双向兼容；`gen-presets.mjs` 能自动吸收官方预设的
+全部变化（rc.1→rc.3 的 3 处）。用例扩到 15 组，新增 case 5b 用**真实
+`renderToolsSdkPy()`** 渲染后断言，并保留 `enum` 数据不被误删。
 
 ## 许可
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentic-env-presets",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Standard and PTC agent presets whose system prompt describes a plain agentic coding environment instead of a branded harness.",
   "license": "MIT",
   "author": "Jing494",
@@ -32,6 +32,8 @@
   "files": [
     "index.js",
     "verify.mjs",
+    "probe-robust.mjs",
+    "probe-restrict.mjs",
     "gen-presets.mjs",
     "presets-standard.patch.yml",
     "presets-ptc.patch.yml",
