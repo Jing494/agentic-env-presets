@@ -357,6 +357,23 @@ git checkout index.js    # restore
 Both were run against 1.2.0: they hit cases 6 and 4 respectively, with every
 other case still passing.
 
+Four more, added in 1.2.1 for the defects that broke a real deployment:
+
+```sh
+# scan every scoped layer again: case 20 (sibling-preset collision) must fail
+#   (replace the ownLayerOf(...) block in shadowContexts with a loop over
+#    prompt.layers.scoped.values())
+
+# ask tools.view() without a scope: case 21 (preset-layer tools) must fail
+sed -i "s/tools.view(state.scope)/tools.view()/" index.js && node verify.mjs
+
+# close over the provider instead of resolving it: case 23 must fail
+#   (replace `const current = resolveCurrent();` with `const current = provider;`)
+
+# register the agent-layer shadow on the preset context: case 22 must fail
+#   (replace `agent.ctx.effect(` with `ctx.effect(` in shadowContextsForAgent)
+```
+
 Two more probes cover the "do not break the harness" side; exit code 0 means
 pass:
 

@@ -1,6 +1,6 @@
 {
   "name": "dsh-agentic-env-presets",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Standard and PTC agent presets whose system prompt describes a plain agentic coding environment instead of a branded harness.",
   "license": "MIT",
   "author": "Jing494",

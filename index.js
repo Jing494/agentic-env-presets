@@ -340,6 +340,68 @@ function patchProviderInPlace(ctx, state, table, name, provider) {
 }
 
 /**
+ * The layer THIS plugin is mounted into, identified WITHOUT guessing.
+ *
+ * `dsh-scope` tags each context with a module-private symbol, so the scope
+ * key is not readable from here. Two earlier attempts were wrong:
+ *
+ *   - iterate every scoped layer: `merged` is keyed by section NAME, so the
+ *     last preset wins a shared name and an in-place patch edits the WRONG
+ *     preset (measured: the preset that mounted us kept the brand and the
+ *     one that did not got scrubbed);
+ *   - recognise our layer by "has `harness:identity` AND a dev-context row":
+ *     with `silenceDevContext: false` layer 1b registers nothing, the
+ *     detection fails, and the `complete: true` prompt leaks again (measured).
+ *
+ * `ScopedLayers.effect()` files every registration under `scopeOf(ctx)`, so
+ * the layer that owns OUR identity section IS our layer — for any config.
+ * It is read back here after `apply()` has registered that section.
+ *
+ * Both the section path and the context path need this, and both need the
+ * same answer: `shadowContexts()` must scan exactly this layer and no other.
+ *
+ * @param prompt - the `systemPrompt` service.
+ * @param state - plugin state; `state.identity` is the section we registered.
+ * @returns our own scoped layer, or `undefined` when it cannot be identified.
+ */
+function ownLayerOf(prompt, state) {
+  try {
+    const scoped = prompt?.layers?.scoped;
+    if (!(scoped instanceof Map)) return undefined;
+    const mine = state?.identity;
+    if (mine === undefined) return undefined;
+    for (const layer of scoped.values()) {
+      if (layer.sections.get(IDENTITY_SECTION) === mine) return layer;
+    }
+  } catch { /* fall through */ }
+  return undefined;
+}
+
+/**
+ * The scope KEY this plugin is mounted under.
+ *
+ * `dsh-scope` keeps the key module-private, but the registry maps key -> layer
+ * and the layer that owns our identity section is ours, so the key can be read
+ * back by identity without importing the symbol. Other scoped registries
+ * (`tools`, for one) key their layers with the SAME object, which is what lets
+ * this package address its own layer there.
+ *
+ * @returns the scope key, or `undefined` when it cannot be identified.
+ */
+function ownScopeKeyOf(prompt, state) {
+  try {
+    const scoped = prompt?.layers?.scoped;
+    if (!(scoped instanceof Map)) return undefined;
+    const mine = state?.identity;
+    if (mine === undefined) return undefined;
+    for (const [key, layer] of scoped.entries()) {
+      if (layer.sections.get(IDENTITY_SECTION) === mine) return key;
+    }
+  } catch { /* fall through */ }
+  return undefined;
+}
+
+/**
  * Re-register every global runtime context under its own name, delegating to
  * the original provider and scrubbing the result.
  *
@@ -365,79 +427,177 @@ function patchProviderInPlace(ctx, state, table, name, provider) {
  */
 function shadowContexts(ctx, state) {
   const prompt = ctx.systemPrompt;
-  const tables = [];
+  let ownTable;
   try {
-    if (prompt.layers?.global?.contexts !== undefined) tables.push(prompt.layers.global.contexts);
-    // Scoped layers too: a preset-scoped provider (a sibling row) is just as
-    // reachable by the model, and the merge lets it win over the global one.
-    if (prompt.layers?.scoped instanceof Map) {
-      for (const layer of prompt.layers.scoped.values()) {
-        if (layer.contexts !== undefined) tables.push(layer.contexts);
-      }
-    }
+    // ONLY the layer this plugin is mounted into. Sibling PRESETS must never
+    // be scanned — see the ownership note above.
+    //
+    // Scanning every scoped layer was a real, shipped regression: another
+    // preset's `tool:subagent:depth` provider looked like an unshadowed
+    // global, so this plugin claimed that name in OUR layer. The preset's own
+    // `tool-subagent` row then tried to register the same name in the SAME
+    // layer and threw `prompt context "tool:subagent:depth" is already
+    // registered in this scope` — which fails preset activation outright
+    // (`agent-preset/invalid`) and blocks every new session on the preset.
+    ownTable = ownLayerOf(prompt, state)?.contexts;
   } catch {
     return;
   }
-  for (const table of tables) {
-    let entries;
-    try {
-      entries = [...table.entries()];
-    } catch {
+  if (ownTable === undefined) return;
+
+  let entries;
+  try {
+    entries = [...ownTable.entries()];
+  } catch {
+    return;
+  }
+  for (const [name, provider] of entries) {
+    // The bookkeeping stores the PROVIDER OBJECT that was handled, not just
+    // the name. A provider disposed and re-registered under the same name is
+    // a different object with different text: skipping by name alone left
+    // its brand text unshadowed (measured — a re-registered
+    // `probe:ctx` came back "DeepSeek Harness context" verbatim).
+    if (state.contexts.get(name) === provider) continue;
+    // Layer 1b already owns this name in our scope; nothing to do.
+    if (state.owned.has(name)) {
+      state.contexts.set(name, provider);
       continue;
     }
-    for (const [name, provider] of entries) {
-      // The bookkeeping stores the PROVIDER OBJECT that was handled, not just
-      // the name. A provider disposed and re-registered under the same name is
-      // a different object with different text: skipping by name alone left
-      // its brand text unshadowed (measured — a re-registered
-      // `probe:ctx` came back "DeepSeek Harness context" verbatim).
-      if (state.contexts.get(name) === provider) continue;
-      // Layer 1b already owns this name in our scope; re-registering would throw.
-      if (state.owned.has(name)) {
-        state.contexts.set(name, provider);
-        continue;
-      }
-      const text = provider.text;
-      if (typeof text !== 'function' && scrubText(text, state.replacements, state.bareToken) === text) {
-        // Nothing to rewrite and no live provider: leave the original in place.
-        state.contexts.set(name, provider);
-        continue;
-      }
+    const text = provider.text;
+    if (typeof text !== 'function' && scrubText(text, state.replacements, state.bareToken) === text) {
+      // Nothing to rewrite and no live provider: leave the original in place.
       state.contexts.set(name, provider);
-      try {
-        ctx.effect(() => prompt.context({
-          ...provider,
-          name,
-          text: (context) => scrubText(
-            typeof text === 'function' ? text(context) : text,
-            state.replacements,
-            state.bareToken,
-          ),
-        }), 'env-identity.shadow-context()');
-      } catch (error) {
-        const message = String(error?.message ?? error);
-        if (!/already registered|duplicate/i.test(message)) {
-          state.failed.push(`context:${name}: ${message}`);
-          ctx.logger?.warn?.(`env-identity: could not shadow context "${name}": ${message}`);
-          continue;
-        }
-        // The provider lives in the SAME layer we mount into, so a same-name
-        // registration can never win. Rewrite the entry instead: `assemble()`
-        // and `refreshContext()` both read `resolveContext(provider)` on every
-        // request, which reads `.text` fresh. Measured: a same-layer provider
-        // re-registered under a name we had already handled came back with its
-        // brand text verbatim.
-        const problem = patchProviderInPlace(ctx, state, table, name, provider);
-        if (problem !== undefined) {
-          state.failed.push(`context:${name}: ${problem}`);
-          ctx.logger?.warn?.(
-            `env-identity: runtime context "${name}" is registered in this preset's own layer `
-            + `(${problem}); its text cannot be rewritten here`,
-          );
-        }
-      }
+      continue;
+    }
+    state.contexts.set(name, provider);
+
+    // A provider in OUR OWN layer cannot be shadowed by re-registering: the
+    // name is taken in the very layer this plugin writes to. Edit the entry
+    // the registry already holds instead — but ONLY that one.
+    //
+    // Doing it in place (never registering) also keeps the name available: a
+    // SIBLING row that declares the same name later registers it normally,
+    // and `system-prompt/change` rescans this table and scrubs the new object
+    // too. Claiming the name with a shadow object here made that row fail
+    // activation with `already registered in this scope`.
+    const problem = patchProviderInPlace(ctx, state, ownTable, name, provider);
+    if (problem !== undefined) {
+      state.failed.push(`context:${name}: ${problem}`);
+      ctx.logger?.warn?.(
+        `env-identity: runtime context "${name}" is registered in this preset's own layer `
+        + `(${problem}); its text cannot be rewritten here`,
+      );
     }
   }
+}
+
+/**
+ * Shadow INHERITED runtime contexts into one live Agent's own layer.
+ *
+ * Inherited (global/ancestor) contexts cannot be shadowed from the preset
+ * layer: registering the name there OCCUPIES it, so a sibling row of the same
+ * preset that declares that name afterwards fails activation with
+ * `already registered in this scope`. That is not hypothetical — `dsh-base`
+ * mounts a global `tool-subagent`, every shipped preset re-declares it, and
+ * the preset then cannot compose at all (`agent-preset/invalid`, every new
+ * session refused).
+ *
+ * The agent's own layer is the right home: it is nearer than both the preset
+ * and the global layer, so it wins the name without occupying anyone else's
+ * namespace, and `assemble()` / `refreshContext()` both merge it because the
+ * very same scope key is passed as `context.scope`.
+ *
+ * @param ctx - this plugin's (preset-scoped) context.
+ * @param state - plugin state; `agentShadows` holds the installed objects.
+ * @param agent - the live Agent whose layer receives the shadows.
+ */
+function shadowContextsForAgent(ctx, state, agent) {
+  const prompt = ctx.get('systemPrompt');
+  if (prompt?.layers === undefined || agent?.ctx === undefined) return;
+  let merged;
+  try {
+    merged = prompt.layers.merge(agent, (layer) => layer.contexts);
+  } catch {
+    return;
+  }
+  const ownTable = ownLayerOf(prompt, state)?.contexts;
+  // One INDIRECTION per name, installed once and never replaced.
+  //
+  // The shadow's `text` resolves the CURRENT winning provider out of the live
+  // registry on every call instead of closing over the object it saw. A
+  // closed-over copy goes stale the moment that provider is disposed and
+  // re-registered under the same name (a rebuilt preset, an HMR reload, a
+  // row mounted after the first turn): measured — the newer provider's text
+  // never appeared, the OLD wrapper kept rendering, and the agent read a
+  // context nobody had registered any more.
+  const installed = state.agentShadows.get(agent) ?? new Map();
+  const pending = [];
+  for (const [name, provider] of merged) {
+    // Own-layer providers are handled in place by `shadowContexts()`; a
+    // registered twin for one of them would be redundant.
+    if (ownTable !== undefined && ownTable.get(name) === provider) continue;
+    if (state.owned.has(name)) continue;
+    if (installed.has(name)) continue;
+    const text = provider.text;
+    if (typeof text !== 'function' && scrubText(text, state.replacements, state.bareToken) === text) continue;
+    pending.push([name, provider]);
+  }
+  if (pending.length === 0) return;
+
+  // Every wrapper this agent has installed, by object identity. The resolver
+  // must never walk INTO one of these: the wrapper delegates to whatever wins
+  // the name, and a wrapper that wins the name would delegate to itself
+  // (measured: RangeError, maximum call stack size exceeded).
+  const wrappers = state.agentWrappers.get(agent) ?? new Set();
+  state.agentWrappers.set(agent, wrappers);
+
+  for (const [name, provider] of pending) {
+    installed.set(name, provider);
+    // Resolve the CURRENT winner out of the live registry, skipping the agent's
+    // own layer (where these wrappers live) and every wrapper object.
+    const resolveCurrent = () => {
+      try {
+        const merged = new Map(prompt.layers.global.contexts.entries());
+        for (const layer of prompt.layers.chainLayers(agent)) {
+          for (const [key, value] of layer.contexts.entries()) {
+            if (wrappers.has(value)) continue;
+            merged.set(key, value);
+          }
+        }
+        const winner = merged.get(name);
+        return winner === undefined || wrappers.has(winner) ? provider : winner;
+      } catch {
+        return provider;
+      }
+    };
+    try {
+      // `agent.ctx` IS the agent's scope, so this row is owned by that agent:
+      // it appears for that agent at assembly time and disappears with it.
+      const wrapper = {
+        ...provider,
+        name,
+        text: (context) => {
+          const current = resolveCurrent();
+          const text = current.text;
+          const raw = typeof text === 'function' ? text(context) : text;
+          return scrubText(raw, state.replacements, state.bareToken);
+        },
+      };
+      wrappers.add(wrapper);
+      agent.ctx.effect(() => {
+        const undo = prompt.context(wrapper);
+        return () => {
+          wrappers.delete(wrapper);
+          undo();
+        };
+      }, 'env-identity.agent-context()');
+    } catch (error) {
+      const message = String(error?.message ?? error);
+      state.failed.push(`agent-context:${name}: ${message}`);
+      ctx.logger?.warn?.(`env-identity: could not shadow context "${name}" for agent "${agent.id}": ${message}`);
+    }
+  }
+  state.agentShadows.set(agent, installed);
 }
 
 
@@ -473,6 +633,84 @@ function scrubSchemaDocs(value, rewrite) {
 }
 
 /**
+ * Rewrite one tool definition the registry ALREADY holds, in place.
+ *
+ * Used for tools registered in this plugin's own layer: re-registering the
+ * name there throws `already registered in this scope`, and a definition in a
+ * nearer layer could never be reached by a farther one. `ToolsService`
+ * projects the schema out of `registration.definition` on every step, so
+ * replacing the few documented fields is enough — and it is exact, because a
+ * definition object belongs to one preset's row (measured: two presets
+ * mounting the same tool row get distinct definition objects).
+ *
+ * Every listed guard is real:
+ *   - a frozen definition cannot be edited; report and leave it alone;
+ *   - a definition reachable from more than one registration would leak the
+ *     rewrite into another preset;
+ *   - `execute`/`render`/`when` and schema DATA must survive untouched, so
+ *     only `description`, `parameters` and `output` are replaced;
+ *   - the original fields are restored on unload, and only while the field is
+ *     still the value this plugin installed.
+ *
+ * @returns `undefined` on success, or a short reason why it refused.
+ */
+function patchToolInPlace(ctx, state, name, registration, rewrite) {
+  const definition = registration.definition;
+  if (Object.isFrozen(definition)) return 'definition object is frozen';
+  // Identity check across every layer: a shared definition must not be edited.
+  try {
+    let seen = 0;
+    const count = (layer) => {
+      try {
+        for (const candidate of layer.tools.values()) if (candidate.definition === definition) seen++;
+      } catch { /* unattachable layer */ }
+    };
+    const layers = ctx.get('tools')?.layers;
+    if (layers !== undefined) {
+      count(layers.global);
+      if (layers.scoped instanceof Map) for (const layer of layers.scoped.values()) count(layer);
+    }
+    if (seen > 1) return 'definition object is shared across layers';
+  } catch { /* fall through to the patch */ }
+
+  const restore = [];
+  const replace = (field, next) => {
+    if (next === undefined || next === definition[field]) return;
+    const original = definition[field];
+    try {
+      definition[field] = next;
+    } catch (error) {
+      state.failed.push(`tool:${name}: ${String(error?.message ?? error)}`);
+      return;
+    }
+    restore.push(() => {
+      // Another owner may have re-registered this tool and replaced the field
+      // value; restoring then would clobber their data.
+      if (definition[field] === next) definition[field] = original;
+    });
+  };
+
+  // `description` is optional on a tool definition. Absent must STAY absent:
+  // writing `''` there would turn "no documentation" into "empty
+  // documentation", a change nobody asked this package to make.
+  if (typeof definition.description === 'string') {
+    replace('description', rewrite(definition.description));
+  }
+  if (definition.parameters !== undefined) {
+    replace('parameters', scrubSchemaDocs(definition.parameters, rewrite));
+  }
+  if (definition.output !== undefined && definition.output.schema !== undefined) {
+    replace('output', { ...definition.output, schema: scrubSchemaDocs(definition.output.schema, rewrite) });
+  }
+  if (restore.length > 0) {
+    ctx.effect(() => () => {
+      for (const undo of restore.reverse()) undo();
+    }, 'env-identity.tool-in-place()');
+  }
+  return undefined;
+}
+
+/**
  * Re-register every branded tool under its own name with scrubbed
  * documentation, forwarding the executable callbacks untouched.
  *
@@ -498,12 +736,34 @@ function shadowTools(ctx, state) {
   const tools = ctx.get('tools');
   if (tools === undefined) return;
   const rewrite = (text) => scrubText(text, state.replacements, state.bareToken);
-  const view = tools.view();
+
+  // Which tools can be shadowed by RE-REGISTERING under the same name?
+  //
+  // Only the ones this scope inherits. The deployment this package ships for
+  // disables every tool row globally and re-declares them inside each preset
+  // (`tool-bash`, `tool-fs`, ...), so the tools the model actually gets are
+  // registered in the PRESET layer — the very layer this plugin registers
+  // into. `tools.view()` with no scope reports the GLOBAL view, which in that
+  // deployment is empty: every tool description kept its brand text
+  // (measured: `probe_tool` stayed "Export the DSH Web UI DOM snapshot.").
+  //
+  // So: shadow the inherited (global + ancestor) tools by re-registration, and
+  // handle our own layer's tools by rewriting the registration in place, which
+  // is the only mechanism that can win there.
+  const own = tools.layers?.peek?.(state.scope);
+  const view = tools.view(state.scope);
   for (const [name, registration] of view.registrations) {
     // Track the REGISTRATION OBJECT, not the name: a tool disposed and
     // re-registered under the same name carries different documentation, and
     // skipping by name would leave its brand text unshadowed.
     if (name === 'run_code' || state.tools.get(name) === registration) continue;
+    // A tool registered in OUR OWN layer: re-registering the name here throws,
+    // so the scrub has to edit the definition the registry already holds.
+    if (own !== undefined && own.tools.get(name) === registration) {
+      state.tools.set(name, registration);
+      patchToolInPlace(ctx, state, name, registration, rewrite);
+      continue;
+    }
     const definition = registration.definition;
     const description = typeof definition.description === 'string' ? definition.description : '';
     const scrubbedDescription = rewrite(description);
@@ -572,37 +832,7 @@ function shadowCompleteSections(ctx, state, scope) {
   // last — exactly `ScopedLayers.merge`. Rebuilt here rather than by calling
   // `merge()`, because the scope token is module-private (`Symbol("dsh.scope")`
   // inside dsh-scope) and this package stays dependency-free.
-  /**
-   * The layer THIS plugin is mounted into, identified WITHOUT guessing.
-   *
-   * `dsh-scope` tags each context with a module-private symbol, so the scope
-   * key is not readable from here. Two earlier attempts were wrong:
-   *
-   *   - iterate every scoped layer: `merged` is keyed by section NAME, so the
-   *     last preset wins a shared name and an in-place patch edits the WRONG
-   *     preset (measured: the preset that mounted us kept the brand and the
-   *     one that did not got scrubbed);
-   *   - recognise our layer by "has `harness:identity` AND a dev-context row":
-   *     with `silenceDevContext: false` layer 1b registers nothing, the
-   *     detection fails, and the `complete: true` prompt leaks again (measured).
-   *
-   * `ScopedLayers.effect()` files every registration under `scopeOf(ctx)`, so
-   * the layer that owns OUR identity section IS our layer — for any config.
-   * It is read back here after `apply()` has registered that section.
-   */
-  const ownLayerOf = () => {
-    try {
-      const scoped = layers.scoped;
-      if (!(scoped instanceof Map)) return undefined;
-      const mine = state.identity;
-      if (mine === undefined) return undefined;
-      for (const layer of scoped.values()) {
-        if (layer.sections.get(IDENTITY_SECTION) === mine) return layer;
-      }
-    } catch { /* fall through */ }
-    return undefined;
-  };
-  const ownLayer = ownLayerOf();
+  const ownLayer = ownLayerOf(prompt, state);
 
   let merged;
   try {
@@ -766,6 +996,10 @@ function apply(ctx, config = {}) {
     bareToken: bareToken !== false,
     /** Context name -> the provider object already handled (identity, not name). */
     contexts: new Map(),
+    /** Agent -> the context names already shadowed in that agent's own layer. */
+    agentShadows: new WeakMap(),
+    /** Agent -> the wrapper objects installed in that agent's layer. */
+    agentWrappers: new WeakMap(),
     /** Context names THIS plugin owns in its own scope — never shadow again. */
     owned: new Set(),
     /** The identity section object this plugin registered (own-layer marker). */
@@ -778,6 +1012,16 @@ function apply(ctx, config = {}) {
     tools: new Map(),
     /** Names that could not be shadowed, for the diagnostic surfaced below. */
     failed: [],
+    /**
+     * The scope key this plugin is mounted under, or `undefined` when it has
+     * none. `shadowTools()` needs it to tell "inherited, shadow by
+     * re-registering" from "my own layer, rewrite in place" — `view()` without
+     * a scope reports the GLOBAL view, which is the wrong question here.
+     *
+     * Read lazily by the first rescan, not here: the identity section has to
+     * be registered first for the layer to be identifiable.
+     */
+    scope: undefined,
   };
 
   // Every registration below is individually contained. Cordis answers a throw
@@ -835,12 +1079,30 @@ function apply(ctx, config = {}) {
     };
     rescanContexts();
     ctx.effect(() => ctx.on('system-prompt/change', rescanContexts), 'env-identity.context-rescan()');
+    // Inherited contexts are shadowed per AGENT, never in the preset layer:
+    // registering the name there would occupy it and break a sibling row that
+    // declares the same name (`dsh-base`'s global `tool-subagent` versus the
+    // preset's own row is exactly that shape).
+    ctx.effect(() => ctx.on('agent/created', ({ agent }) => {
+      try {
+        shadowContextsForAgent(ctx, state, agent);
+      } catch (error) {
+        ctx.logger?.warn?.(`env-identity: agent context shadow stopped early: ${String(error)}`);
+      }
+    }), 'env-identity.agent-created()');
   }
 
   // 3. Tool schemas: same-name shadow with a scrubbed description.
   if (scrubToolDescriptions) {
+    // Resolve our own scope once, AFTER the identity section above exists:
+    // that section is the marker by which the owning layer — and therefore the
+    // key other scoped registries use — is read back.
+    if (state.scope === undefined) state.scope = ownScopeKeyOf(ctx.systemPrompt, state);
     const rescanTools = () => {
       try {
+        // The key can appear late (a deployment that registers the identity
+        // section after us), so a missing one is retried on every rescan.
+        if (state.scope === undefined) state.scope = ownScopeKeyOf(ctx.systemPrompt, state);
         shadowTools(ctx, state);
       } catch (error) {
         ctx.logger?.warn?.(`env-identity: tool shadow stopped early: ${String(error)}`);

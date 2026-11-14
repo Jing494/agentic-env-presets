@@ -64,7 +64,7 @@ const importLocal = (file) => import(pathToFileURL(path.join(HERE, file)).href);
 const { Context, Service } = await importFromDsh('@deepseek-ai/cordis');
 const SystemPrompt = (await importFromDsh('@deepseek-ai/dsh-system-prompt')).default;
 const { renderPrompt, renderContextSnapshot } = await importFromDsh('@deepseek-ai/dsh-system-prompt');
-const { createScope, bindScopeParent } = await importFromDsh('@deepseek-ai/dsh-scope');
+const { createScope, bindScopeParent, scopeTarget } = await importFromDsh('@deepseek-ai/dsh-scope');
 const HarnessDevContext = await importFromDsh('@deepseek-ai/dsh-harness-dev-context');
 const Persona = await importFromDsh('@deepseek-ai/dsh-persona');
 const ToolsService = (await importFromDsh('@deepseek-ai/dsh-tools')).default;
@@ -168,6 +168,26 @@ function brandedToolPlugin(ctx) {
 }
 brandedToolPlugin.inject = ['tools'];
 
+/**
+ * A delegation row's runtime context, reproduced from `@deepseek-ai/dsh-tool-subagent`.
+ *
+ * That plugin registers `tool:<toolName>:depth` as a LIVE provider in whatever
+ * scope it is mounted into. Each preset declares its OWN `tool-subagent` rows,
+ * so two presets hold the same name in two different layers — which is exactly
+ * the shape that used to make our scan collide with a sibling row.
+ */
+function subagentDepthRow(ctx, config) {
+  ctx.systemPrompt.context({
+    name: `tool:${config.toolName}:depth`,
+    order: ctx.systemPrompt.getContextOrder('SUBAGENT_DELEGATION') ?? 120,
+    text: (context) => {
+      if (context?.agent === undefined) return '';
+      return `Delegation depth for ${config.toolName}: current 1, maximum 3. Do not call it at this depth.`;
+    },
+  });
+}
+subagentDepthRow.inject = ['systemPrompt'];
+
 /** The skill plugin, reproduced with the same emit-after-next() shape. */
 function skillCatalogPlugin(ctx) {
   ctx.on('agent/pre-step', async (payload, next) => {
@@ -232,10 +252,6 @@ async function compose({ branch, identity, silence, replacements, devContextFirs
   await tick();
 
   const presetKey = {};
-  // The agent object IS its scope key, exactly like the real loop
-  // (`createScope(loopCtx, this)` then `bindScopeParent(agentKey, presetKey)`).
-  const agent = { id: 'probe-agent' };
-  const agentKey = agent;
   const presetScope = createScope(ctx, presetKey);
   presetScope.ctx.plugin(Persona, { prefix: 'You are a coding agent powered by the {{model}} model.' });
   if (branch) {
@@ -245,8 +261,11 @@ async function compose({ branch, identity, silence, replacements, devContextFirs
     );
   }
   await tick();
-  createScope(ctx, agentKey, { parent: presetKey });
-  await tick();
+  // The agent object IS its scope key, exactly like the real loop
+  // (`createScope(loopCtx, this)` then `bindScopeParent(agentKey, presetKey)`).
+  const agent = createAgent(ctx, presetKey);
+  const agentKey = agent;
+  await announceAgent(ctx, agent);
 
   const assembly = await ctx.systemPrompt.assemble({ scope: agentKey });
   // The loop supplies `model`; renderPrompt interpolates it in the persona.
@@ -289,6 +308,31 @@ async function compose({ branch, identity, silence, replacements, devContextFirs
 
 /** Let Cordis fibers activate (the real Loader awaits these too). */
 const tick = () => new Promise((r) => setTimeout(r, 60));
+
+/**
+ * Create an Agent the way the real loop does.
+ *
+ * `ReactLoop` mints `createScope(loopCtx, this)` and exposes that context as
+ * `agent.ctx`, then `AgentRegistry.announce()` emits `agent/created` through a
+ * scope carrier. A preset plugin that shadows runtime contexts does its work
+ * in THAT listener, because the agent's own layer is the only one it can use
+ * without occupying a name its sibling rows need. A harness that skips the
+ * announcement therefore never receives the shadow — so `verify.mjs` announces
+ * too, instead of calling `assemble()` on a half-built agent.
+ */
+const createAgent = (ctx, parentKey, id = 'probe-agent') => {
+  const agent = { id };
+  const scope = createScope(ctx, agent, { parent: parentKey });
+  agent.ctx = scope.ctx;
+  return agent;
+};
+
+/** Announce one agent (outermost creation edge) and let its listeners settle. */
+const announceAgent = async (ctx, agent) => {
+  ctx.serial(scopeTarget(ctx, agent), 'agent/created', { agent });
+  await tick();
+  await tick();
+};
 
 /**
  * Every brand PHRASE the model could see, checked as exact substrings.
@@ -982,6 +1026,255 @@ for (const c of [
   }, [
     `junk pairs -> ${results.junkPairs.prompt.slice(0, 80)}`,
     `null pairs -> ${results.nullPairs.prompt.slice(0, 60)}`,
+  ]);
+}
+
+// -------------------------------------------------------------- case 20
+{
+  // THE SHIPPED CRASH. Real report: creating a new session failed with
+  //   agent-preset/invalid: prompt context "tool:subagent:depth" is already
+  //   registered in this scope
+  //
+  // Cause: `shadowContexts()` iterated EVERY scoped layer, so a context owned
+  // by a DIFFERENT preset looked like an unshadowed global. Our plugin claimed
+  // that name in OUR layer; the preset's own `tool-subagent` row then tried to
+  // register the same name in the SAME layer and threw, which fails preset
+  // activation outright and blocks every new session on that preset.
+  //
+  // The row ORDER is what made it fatal: `env-identity` sits at row 2 of the
+  // shipped clones, so it ran before the sibling rows that own those names.
+  const mount = async (rows) => {
+    const ctx = new Context();
+    ctx.plugin(SystemPrompt, { personaPrefix: '' });
+    await tick();
+    // Another preset mounts first and owns `tool:*:depth` in ITS layer.
+    const shipped = createScope(ctx, {});
+    shipped.ctx.plugin(subagentDepthRow, { toolName: 'subagent' });
+    shipped.ctx.plugin(subagentDepthRow, { toolName: 'subagent_fork' });
+    await tick();
+    // Ours: env-identity at row 2, the delegating rows after it.
+    const ours = {};
+    const preset = createScope(ctx, ours);
+    preset.ctx.plugin(Persona, { prefix: 'p' });
+    const fibers = [
+      preset.ctx.plugin({ apply: envApply, inject: envInject, name: envName }, { identity: IDENTITY }),
+      preset.ctx.plugin(subagentDepthRow, { toolName: 'subagent' }),
+      preset.ctx.plugin(subagentDepthRow, { toolName: 'subagent_fork' }),
+    ];
+    await tick();
+    const failures = [];
+    for (const fiber of fibers) {
+      try { await fiber.await(); } catch (error) { failures.push(String(error?.message ?? error)); }
+    }
+    const agentKey = {};
+    createScope(ctx, agentKey, { parent: ours });
+    await tick();
+    // The loop always supplies `agent` alongside `scope`; these providers read
+    // `context.agent` and render '' without it.
+    const agent = { id: 'probe-agent' };
+    const assembly = await ctx.systemPrompt.assemble({ agent, scope: agentKey });
+    const refreshed = ctx.systemPrompt.refreshContext(assembly, { agent, scope: agentKey });
+    return { failures, context: renderContextSnapshot(refreshed) };
+  };
+  const result = await mount();
+  report('case 20: a sibling preset\'s context name is never claimed', {
+    // The whole preset must activate; one failed row blocks new sessions.
+    allRowsActivated: result.failures.length === 0,
+    // Narrowing the scan must not lose the SIBLING ROWS' own text...
+    siblingContextKept: result.context.includes('Delegation depth for subagent'),
+    siblingForkContextKept: result.context.includes('Delegation depth for subagent_fork'),
+  }, [
+    `failures: ${result.failures.length ? result.failures.join(' | ') : 'none'}`,
+    '--- runtime context ---',
+    result.context || '(empty)',
+  ]);
+}
+
+// -------------------------------------------------------------- case 21
+{
+  // THE SECOND SHIPPED LEAK. In the deployment this package ships for, every
+  // tool row is disabled globally and re-declared INSIDE each preset
+  // (`tool-bash`, `tool-fs`, ...). `shadowTools()` asked `tools.view()` with no
+  // scope — the GLOBAL view — which is empty there, so every tool description
+  // kept its brand text. Measured before the fix: a preset-layer tool still
+  // read "Export the DSH Web UI DOM snapshot."
+  const ctx = new Context();
+  ctx.plugin(SystemPrompt, { personaPrefix: '' });
+  ctx.plugin(ToolsService);
+  await tick();
+  const presetKey = {};
+  const agentKey = {};
+  const preset = createScope(ctx, presetKey);
+  preset.ctx.plugin({ apply: envApply, inject: envInject, name: envName }, { identity: IDENTITY });
+  preset.ctx.plugin(brandedToolPlugin);   // registered in the PRESET layer
+  await tick();
+  createScope(ctx, agentKey, { parent: presetKey });
+  await tick();
+  const toolSet = await ctx.tools.resolve({ agent: agentKey, signal: new AbortController().signal });
+  const schemas = ctx.tools.schemas(agentKey, toolSet);
+  const tool = schemas.find((t) => t.name === 'probe_branded_tool');
+  // `probe_param_brand_tool` is the one whose brand text lives ONLY inside
+  // `parameters`, so it is the real test of the recursive scrub.
+  const paramTool = schemas.find((t) => t.name === 'probe_param_brand_tool');
+  const other = schemas.find((t) => t.name === 'probe_identifier_tool');
+  const docs = [];
+  const collect = (node) => {
+    if (node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) { for (const item of node) collect(item); return; }
+    for (const [key, child] of Object.entries(node)) {
+      if ((key === 'description' || key === 'title') && typeof child === 'string') docs.push(child);
+      else collect(child);
+    }
+  };
+  collect(paramTool?.parameters ?? {});
+  report('case 21: preset-layer tools are scrubbed too', {
+    toolVisibleFromPresetLayer: tool !== undefined,
+    topLevelClean: tool !== undefined && leaks(tool.description).length === 0,
+    parameterDocsClean: docs.length > 0 && docs.flatMap((text) => leaks(text)).length === 0,
+    identifiersIntact: other !== undefined && other.description === IDENTIFIER_PROBE,
+  }, [
+    `description: ${tool?.description ?? '(missing)'}`,
+    `parameter docs: ${docs.join(' / ') || '(none)'}`,
+  ]);
+}
+
+// -------------------------------------------------------------- case 22
+{
+  // THE STOCK-DEPLOYMENT CRASH. `dsh-base` mounts a GLOBAL `tool-subagent`
+  // (enabled); only `dsh-web-app` disables it. Every shipped preset re-declares
+  // the same row. So on a profile without the web-app override, the global and
+  // the preset copy of `tool:subagent:depth` share a name.
+  //
+  // Shadowing that global name FROM THE PRESET LAYER occupies it, and the
+  // preset's own row then fails with `already registered in this scope` —
+  // byte-identical to the reported `agent-preset/invalid`, and fatal the same
+  // way. Inherited contexts must therefore be shadowed in the AGENT's layer,
+  // which competes with nobody.
+  const mountOrdering = async (envFirst) => {
+    const ctx = new Context();
+    ctx.plugin(SystemPrompt, { personaPrefix: '' });
+    await tick();
+    // GLOBAL owner of the name, as `dsh-base` does it. The text carries the
+    // brand so "did the other preset stay untouched" is observable.
+    ctx.plugin(subagentDepthRow, { toolName: 'subagent' });
+    await tick();
+    const otherKey = {};
+    createScope(ctx, otherKey);
+    const oursKey = {};
+    const ours = createScope(ctx, oursKey);
+    const envFiber = envFirst
+      ? ours.ctx.plugin({ apply: envApply, inject: envInject, name: envName }, { identity: IDENTITY })
+      : undefined;
+    await tick();
+    const sibling = ours.ctx.plugin(subagentDepthRow, { toolName: 'subagent' });
+    let siblingError;
+    try { await sibling.await(); } catch (error) { siblingError = String(error?.message ?? error); }
+    if (envFiber === undefined) {
+      ours.ctx.plugin({ apply: envApply, inject: envInject, name: envName }, { identity: IDENTITY });
+      await tick();
+    }
+    // A preset WITHOUT us keeps the brand; ours must not touch it.
+    const otherAgent = createAgent(ctx, otherKey, 'other');
+    const ourAgent = createAgent(ctx, oursKey, 'ours');
+    await announceAgent(ctx, otherAgent);
+    await announceAgent(ctx, ourAgent);
+
+    // NOTE: no "late sibling re-declaring the SAME name" probe here. Two rows
+    // registering one name in ONE preset layer is rejected by the registry
+    // itself, with or without this plugin (verified separately), so asserting
+    // it would be testing somebody else's rule. What this case pins is the
+    // coexistence of a GLOBAL owner with the preset's own row — the shape
+    // `dsh-base` + every shipped preset actually produces.
+    const textFor = async (agent) => {
+      const assembly = await ctx.systemPrompt.assemble({ agent, scope: agent });
+      return renderContextSnapshot(ctx.systemPrompt.refreshContext(assembly, { agent, scope: agent }));
+    };
+    return {
+      siblingError,
+      otherText: await textFor(otherAgent),
+      ourText: await textFor(ourAgent),
+    };
+  };
+  const first = await mountOrdering(true);
+  const last = await mountOrdering(false);
+  // NOTE: this case does NOT require a brand in the probed context — what it
+  // pins is the ACTIVATION outcome plus the blast radius. `leaks()` on the
+  // other preset is the blast-radius half, and the sibling text proves the
+  // preset's own row kept working.
+  const ok = (r) => r.siblingError === undefined
+    && r.otherText.includes('Delegation depth for subagent')
+    && r.ourText.includes('Delegation depth for subagent')
+    && r.otherText.includes('Delegation depth for subagent')
+    && r.ourText.includes('Delegation depth for subagent');
+  report('case 22: a global context name is never occupied by the preset', {
+    envMountedFirst: ok(first),
+    envMountedLast: ok(last),
+  }, [
+    `env first: sibling=${first.siblingError ?? 'ok'}`,
+    `  other preset: ${first.otherText.split('\n').filter(Boolean).slice(1).join(' | ')}`,
+    `  our   preset: ${first.ourText.split('\n').filter(Boolean).slice(1).join(' | ')}`,
+    `env last : sibling=${last.siblingError ?? 'ok'}`,
+    `  other preset: ${last.otherText.split('\n').filter(Boolean).slice(1).join(' | ')}`,
+    `  our   preset: ${last.ourText.split('\n').filter(Boolean).slice(1).join(' | ')}`,
+  ]);
+}
+
+// -------------------------------------------------------------- case 23
+{
+  // THE STALE-WRAPPER BUG. The agent-layer shadow must resolve the CURRENT
+  // winner instead of closing over the provider it saw when it was installed.
+  //
+  // Closing over it meant a provider disposed and re-registered under the same
+  // name (a rebuilt preset, an HMR reload, a row mounted after the first turn)
+  // never reached the model: the OLD wrapper kept rendering text nobody had
+  // registered any more. Measured before the fix: D2 still read "one."
+  //
+  // The resolver must also skip its own wrappers, or a wrapper that wins the
+  // name delegates to itself — a RangeError, not a leak.
+  const ctx = new Context();
+  ctx.plugin(SystemPrompt, { personaPrefix: '' });
+  await tick();
+  const presetKey = {};
+  const preset = createScope(ctx, presetKey);
+  preset.ctx.plugin({ apply: envApply, inject: envInject, name: envName }, { identity: IDENTITY });
+  await tick();
+  const agent = createAgent(ctx, presetKey, 'stale-probe');
+
+  const mountOwner = (label) => {
+    const owner = (c) => {
+      c.systemPrompt.context({
+        name: 'probe:replaceable', order: 110,
+        text: () => `Current DSH file policy: ${label}.`,
+      });
+    };
+    owner.inject = ['systemPrompt'];
+    return ctx.plugin(owner);
+  };
+  const render = async () => {
+    await announceAgent(ctx, agent);
+    const assembly = await ctx.systemPrompt.assemble({ agent, scope: agent });
+    const refreshed = ctx.systemPrompt.refreshContext(assembly, { agent, scope: agent });
+    return renderContextSnapshot(refreshed);
+  };
+
+  const firstOwner = mountOwner('one');
+  await tick();
+  const first = await render();
+  await firstOwner.dispose?.();
+  await tick();
+  mountOwner('two');
+  await tick();
+  const second = await render();
+
+  report('case 23: a replaced provider is read through, not frozen in', {
+    firstScrubbed: leaks(first).length === 0 && first.includes('one.'),
+    // The replacement's text must appear AND stay scrubbed.
+    replacementVisible: second.includes('two.'),
+    replacementScrubbed: leaks(second).length === 0,
+    didNotThrow: true,
+  }, [
+    `first : ${first.split('\n').filter(Boolean).slice(1).join(' | ')}`,
+    `second: ${second.split('\n').filter(Boolean).slice(1).join(' | ')}`,
   ]);
 }
 
