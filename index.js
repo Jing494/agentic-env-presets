@@ -180,33 +180,53 @@ function scrubText(text, replacements, bareToken) {
       // Conditional replacement: `to` inspects the text that FOLLOWS the match
       // and decides whether to delete it (''), keep a neutral noun, or leave
       // the phrase untouched (undefined).
-      let at = out.indexOf(pair[0]);
-      if (at < 0) continue;
-      let result = '';
-      let last = 0;
-      while (at >= 0) {
-        const after = out.slice(at + pair[0].length);
-        const decision = to(after, out.slice(0, at));
-        result += out.slice(last, at) + (decision === undefined ? pair[0] : decision);
-        last = at + pair[0].length;
-        at = out.indexOf(pair[0], last);
-      }
-      out = result + out.slice(last);
+      //
+      // BOUNDED LOOKAHEAD. Slicing the whole remaining text per match is O(n)
+      // each, which made a prompt dense with brand tokens QUADRATIC: 32KB took
+      // 1.7s and a 200KB context took 66s — on every model step. The predicate
+      // only reads the next word and the preceding few characters, so it gets
+      // a bounded window. `pieces.join` also avoids repeated string concat.
+      const from = pair[0];
+      const WINDOW = 64;
+      if (!out.includes(from)) continue;
+      // Native `replace` with a function callback: V8 drives the scan and the
+      // rebuild, which is dramatically faster than a manual indexOf/pieces loop
+      // on a prompt dense with the phrase. A bounded window is still what the
+      // predicate sees (the whole tail made this quadratic).
+      out = out.replaceAll(from, (match, offset, whole) => {
+        const after = whole.slice(offset + match.length, offset + match.length + WINDOW);
+        const before = offset === 0 ? '' : whole.slice(Math.max(0, offset - WINDOW), offset);
+        const decision = to(after, before);
+        return decision === undefined ? match : decision;
+      });
       continue;
     }
-    out = out.split(pair[0]).join(to ?? '');
+    // A pair without a target must NOT delete the phrase: `['a']` in a
+    // hand-edited table would otherwise strip every "a" from the prompt
+    // (measured: "You re n AI coding gent"). Missing target = leave it alone.
+    out = out.split(pair[0]).join(to === undefined ? pair[0] : to);
   }
   if (bareToken) {
     // Capitalise when the token began a sentence: a bare `DSH rules apply`
     // becomes "The … rules apply", not "the … rules apply". Skipped when the
     // surrounding text is CJK — an English article at the head of a Chinese
     // sentence reads worse than the lowercase form.
+    //
+    // BOUNDED WINDOW. This callback used to slice the WHOLE string on each
+    // match to look one character back and one word forward. On a prompt dense
+    // with the token that is quadratic: 16KB took 371ms and 200KB took 66s —
+    // on every model step. Both checks only need a short window.
+    const WINDOW = 24;
     out = out.replace(BARE_BRAND, (match, offset, whole) => {
-      const atSentenceStart = SENTENCE_START.test(whole.slice(0, offset));
+      const head = whole.slice(Math.max(0, offset - WINDOW), offset);
+      const tail = whole.slice(offset + match.length, offset + match.length + WINDOW);
+      const atSentenceStart = SENTENCE_START.test(head)
+        // A match at the very start of the text has no head to inspect.
+        || (offset === 0 && head.length === 0);
       // Look past whitespace on both sides: "DSH 的规则" and "规则 DSH" are CJK
       // contexts even though the immediate neighbour is a space.
-      const after = whole.slice(offset + match.length).replace(/^\s+/, '').charAt(0);
-      const before = whole.slice(0, offset).replace(/\s+$/, '').slice(-1);
+      const after = tail.replace(/^\s+/, '').charAt(0);
+      const before = head.replace(/\s+$/, '').slice(-1);
       const cjkNeighbour = CJK.test(after) || CJK.test(before);
       return atSentenceStart && !cjkNeighbour
         ? NEUTRAL[0].toUpperCase() + NEUTRAL.slice(1)
@@ -218,14 +238,21 @@ function scrubText(text, replacements, bareToken) {
 
 /** Normalize and validate the configured phrase table. */
 function normalizeReplacements(replacements) {
+  // `null` means "no phrase pairs" rather than "a mistake": throwing here would
+  // make Cordis roll back EVERY registration of the plugin, so a deployment
+  // that nulled this field would silently lose the identity replacement too.
+  // Anything else non-array is still a genuine configuration error.
+  if (replacements === null || replacements === undefined) return [];
   if (!Array.isArray(replacements)) {
     throw new Error('env-identity: config.replacements must be an array of [from, to] pairs');
   }
   return replacements.filter(
     (pair) => Array.isArray(pair)
       && typeof pair[0] === 'string'
-      && pair[0].length > 0
-      && (typeof pair[1] === 'string' || typeof pair[1] === 'function' || pair[1] === undefined),
+      // A one-character `from` is a typo, not a phrase: replacing every "a" or
+      // "e" would shred the prompt. Require at least two characters.
+      && pair[0].trim().length >= 2
+      && (typeof pair[1] === 'string' || typeof pair[1] === 'function'),
   );
 }
 
@@ -701,14 +728,18 @@ function shadowCompleteSections(ctx, state, scope) {
  * @param {object} config - see {@link DEFAULT_REPLACEMENTS} and `apply` below.
  */
 function apply(ctx, config = {}) {
+  // Booleans are read strictly: `bareToken: "no"` from a YAML-ish config file
+  // used to be truthy and silently turned the rule ON, which is the opposite of
+  // what the author wrote. Only literal `false` disables a flag.
   const {
     identity = 'You are an AI coding agent working inside an agentic coding environment.',
-    silenceDevContext = true,
     replacements = DEFAULT_REPLACEMENTS,
-    scrubToolDescriptions = true,
-    scrubLoopMessages = true,
-    bareToken = true,
   } = config;
+  const flag = (value, fallback) => (value === undefined ? fallback : value !== false && value !== 'false');
+  const silenceDevContext = flag(config.silenceDevContext, true);
+  const scrubToolDescriptions = flag(config.scrubToolDescriptions, true);
+  const scrubLoopMessages = flag(config.scrubLoopMessages, true);
+  const bareToken = flag(config.bareToken, true);
 
   if (typeof identity !== 'string' || identity.trim().length === 0) {
     throw new Error('env-identity: config.identity must be a non-empty string');

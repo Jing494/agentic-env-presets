@@ -127,7 +127,7 @@ it until they restart.
 | [`presets-standard.patch.yml`](presets-standard.patch.yml) | Standard clone, preset id `standard-env`, Loader row `preset-standard-env` |
 | [`presets-ptc.patch.yml`](presets-ptc.patch.yml) | PTC clone (`run_code`-only executor, workflow / plugin-market tools disabled), preset id `ptc-env` |
 | [`index.js`](index.js) | The `env-identity` rewriter plugin (five layers, config-driven phrase table and three switches) |
-| [`verify.mjs`](verify.mjs) | Reproducible 18-case verification against the real shipped plugins, plus mutation-test instructions |
+| [`verify.mjs`](verify.mjs) | Reproducible 20-case verification against the real shipped plugins, plus mutation-test instructions |
 | [`probe-restrict.mjs`](probe-restrict.mjs) | Proves a tool shadow does **not** bypass a subagent's `tools.restrict()` |
 | [`probe-robust.mjs`](probe-robust.mjs) | Proves missing services/fields degrade to a no-op instead of throwing (with a control case) |
 | [`gen-presets.mjs`](gen-presets.mjs) | Regenerates both patches from the shipped files (fidelity check/upgrade tool) |

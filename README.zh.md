@@ -117,7 +117,7 @@ dsh plugin --profile web remove dsh-agentic-env-presets
 | [`presets-standard.patch.yml`](presets-standard.patch.yml) | Standard 克隆，预设 id `standard-env`，Loader 行 `preset-standard-env` |
 | [`presets-ptc.patch.yml`](presets-ptc.patch.yml) | PTC 克隆（仅 `run_code` 执行器，workflow / 插件市场工具关闭），预设 id `ptc-env` |
 | [`index.js`](index.js) | `env-identity` 改写插件（五层，短语表与三个开关可配置） |
-| [`verify.mjs`](verify.mjs) | 针对真实官方插件的 18 组可复跑验证（含变异测试说明） |
+| [`verify.mjs`](verify.mjs) | 针对真实官方插件的 20 组可复跑验证（含变异测试说明） |
 | [`probe-restrict.mjs`](probe-restrict.mjs) | 证明工具同名遮蔽**不会**绕过子 agent 的 `tools.restrict()` |
 | [`probe-robust.mjs`](probe-robust.mjs) | 证明缺服务/缺字段时**降级为 no-op 而不抛错**（含对照实验） |
 | [`gen-presets.mjs`](gen-presets.mjs) | 从官方文件重新生成两个 patch（保真检查／升级工具） |
@@ -270,7 +270,7 @@ $DSH_HOME   DSH_ENV_PREFIX   __DSH_BOOT__   engines.dsh
 `dsh-persona`、`dsh-tools`、`dsh-tool-executor-native`、`dsh-agent`、`dsh-scope`，
 外加 `dsh-harness-dev-context` 注入的两个 Host 服务桩（`webApp`、`sessionProjections`）。
 它开一个 preset scope，在其下链一个 agent scope，然后按**循环真实的顺序**装配、刷新、
-渲染、解析工具、跑 pre-step，做**精确子串**断言。十八组：
+渲染、解析工具、跑 pre-step，做**精确子串**断言。二十组：
 
 | 用例 | 断言 |
 |---|---|
@@ -413,7 +413,7 @@ Harness）里」。从会话日志取出那次请求后，确认泄漏来自 **1
 - 新增**技能目录擦洗**，监听器用 `{prepend:true}` 注册在最外层——技能目录是在
   `next()` 之后才追加的，注册在默认内层会静默失效。
 - 裸 `DSH` 改用带断言的窄正则兜底，`$DSH_HOME` 这类标识符逐字保留。
-- `verify.mjs` 从 3 组扩到 18 组，覆盖上述每一条，并用变异测试证明它们真的会失败。
+- `verify.mjs` 从 3 组扩到 20 组，覆盖上述每一条，并用变异测试证明它们真的会失败。
   其中第 8 组来自安装后 e2e 实测：遮蔽扫描曾被自己的空遮蔽打断，导致**挂载顺序**决定
   是否泄漏——单一顺序的测试套件测不出这类 bug。
 
@@ -427,7 +427,7 @@ Harness）里」。从会话日志取出那次请求后，确认泄漏来自 **1
 | 技能**正文** | `skill-invocation` 与技能目录由同一个 `agent/pre-step` 追加，之前只擦了目录 |
 
 同时实测：0.1.7-rc.2 与 0.2.2-rc.3 双向兼容；`gen-presets.mjs` 能自动吸收官方预设的
-全部变化（rc.1→rc.3 的 3 处）。用例扩到 18 组，新增 case 5b 用**真实
+全部变化（rc.1→rc.3 的 3 处）。用例扩到 20 组，新增 case 5b 用**真实
 `renderToolsSdkPy()`** 渲染后断言，并保留 `enum` 数据不被误删。
 
 ## 许可

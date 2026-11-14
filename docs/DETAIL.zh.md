@@ -113,13 +113,13 @@ dsh --profile web --dump-config | grep -c env-identity
 
 `verify.mjs` 挂载真实的提示词、工具、执行器与 agent 包，开一个 preset scope、在其下链
 一个 agent scope，按**循环真实的顺序**装配、刷新、渲染、解析工具、跑 pre-step，
-对十八组用例做**精确子串**断言。退出码 0 表示全部通过。
+对二十组用例做**精确子串**断言。退出码 0 表示全部通过。
 
 ```sh
 node verify.mjs            # 或：node verify.mjs <dsh 安装目录>
 ```
 
-十八组分别对应：默认配置、关闭静默、基线预设（必须仍显示品牌）、`refreshContext()`
+二十组分别对应：默认配置、关闭静默、基线预设（必须仍显示品牌）、`refreshContext()`
 之后、工具 schema、技能目录（必须被**真的改写**）、标识符安全、**挂载顺序无关**。
 
 **改完代码请跑变异测试**——去掉 `{prepend:true}` 必须让第 6 组失败，停掉上下文遮蔽

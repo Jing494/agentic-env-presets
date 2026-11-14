@@ -945,6 +945,73 @@ for (const c of [
   }
 }
 
+// --------------------------------------------------------------- case 18
+{
+  // Hostile / sloppy config must not disable the package. A throw from apply()
+  // makes Cordis roll back EVERY registration, so a nulled phrase table would
+  // silently cost the identity replacement too; and a one-character `from`
+  // entry used to shred the prompt ("You re n AI coding gent").
+  const run = async (config) => {
+    const ctx = new Context();
+    ctx.plugin(SystemPrompt, { personaPrefix: '' });
+    await tick();
+    const presetKey = {};
+    const agentKey = {};
+    const preset = createScope(ctx, presetKey);
+    preset.ctx.plugin({ apply: envApply, inject: envInject, name: envName }, config);
+    await tick();
+    const registered = [...ctx.systemPrompt.layers.scoped.values()]
+      .some((layer) => layer.sections.has('harness:identity'));
+    createScope(ctx, agentKey, { parent: presetKey });
+    await tick();
+    const assembly = await ctx.systemPrompt.assemble({ scope: agentKey });
+    assembly.variables = { ...assembly.variables, model: 'm' };
+    return { registered, prompt: renderPrompt(assembly) };
+  };
+  const results = {
+    nullPairs: await run({ replacements: null }),
+    emptyPairs: await run({ replacements: [] }),
+    junkPairs: await run({ replacements: [null, 1, ['a'], ['x']] }),
+    stringFlag: await run({ bareToken: 'false' }),
+  };
+  const allRegistered = Object.values(results).every((r) => r.registered);
+  report('case 18: odd configuration never disables the package', {
+    identityRegisteredEverywhere: allRegistered,
+    junkPairDidNotShred: results.junkPairs.prompt
+      === 'You are an AI coding agent working inside an agentic coding environment.',
+  }, [
+    `junk pairs -> ${results.junkPairs.prompt.slice(0, 80)}`,
+    `null pairs -> ${results.nullPairs.prompt.slice(0, 60)}`,
+  ]);
+}
+
+// --------------------------------------------------------------- case 19
+{
+  // scrubText runs on EVERY model step. It used to slice the whole string per
+  // match to look one character back and one word forward, which is quadratic:
+  // a 200KB context took 66 seconds. Prompts with many brand tokens are exactly
+  // the pathological input, so this pins linear-ish behaviour.
+  const build = (n) => 'DSH '.repeat(n);
+  const time = (text) => {
+    const started = process.hrtime.bigint();
+    scrubText(text, DEFAULT_REPLACEMENTS, true);
+    return Number(process.hrtime.bigint() - started) / 1e6;
+  };
+  time(build(500));            // warm up
+  const small = time(build(2000));
+  const large = time(build(8000));   // 4x the tokens
+  // Quadratic would be ~16x; anything under 10x is comfortably linear enough.
+  const ratio = large / Math.max(small, 0.5);
+  report('case 19: scrubbing stays linear on token-dense text', {
+    // 32000 tokens must finish well inside a step budget.
+    largeUnder500ms: large < 500,
+    notQuadratic: ratio < 10,
+  }, [
+    `2000 tokens: ${small.toFixed(1)}ms`,
+    `8000 tokens: ${large.toFixed(1)}ms (ratio ${ratio.toFixed(1)}x, quadratic would be ~16x)`,
+  ]);
+}
+
 // Counted, not hardcoded: adding a case must never leave this line lying.
 console.log(`\n${failed === 0 ? `ALL ${total} CASES PASS` : `${failed} OF ${total} CASE(S) FAILED`}`);
 process.exit(failed === 0 ? 0 : 1);
